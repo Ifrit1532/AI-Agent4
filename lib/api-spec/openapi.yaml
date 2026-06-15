@@ -3,20 +3,21 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Price Matcher AI Agent API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: match
+    description: Price matching operations
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,13 +25,100 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /match/download:
+    post:
+      operationId: downloadMatchResult
+      tags: [match]
+      summary: Download matched results as Excel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MatchResultInput"
+      responses:
+        "200":
+          description: Excel file download URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
 components:
   schemas:
     HealthStatus:
       type: object
+      required: [status]
       properties:
         status:
           type: string
-      required:
-        - status
 
+    MatchedItem:
+      type: object
+      required: [name, quantity, found]
+      properties:
+        name:
+          type: string
+        quantity:
+          type: number
+        unit:
+          type: ["string", "null"]
+        unitPrice:
+          type: ["number", "null"]
+        totalPrice:
+          type: ["number", "null"]
+        found:
+          type: boolean
+        matchedName:
+          type: ["string", "null"]
+
+    MatchResult:
+      type: object
+      required: [items, grandTotal, currency]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MatchedItem"
+        grandTotal:
+          type: number
+        currency:
+          type: string
+        notes:
+          type: ["string", "null"]
+
+    MatchResultInput:
+      type: object
+      required: [items, grandTotal, currency]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MatchedItem"
+        grandTotal:
+          type: number
+        currency:
+          type: string
+        notes:
+          type: ["string", "null"]
+
+    DownloadResponse:
+      type: object
+      required: [downloadId]
+      properties:
+        downloadId:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
