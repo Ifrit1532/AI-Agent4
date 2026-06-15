@@ -16,7 +16,6 @@ export interface PriceItem {
   name: string;
   price: number;
   unit?: string | null;
-  currency?: string;
 }
 
 export interface MatchedItem {
@@ -36,51 +35,98 @@ export interface MatchResult {
   notes: string | null;
 }
 
-export async function matchPrices(
-  orderItems: OrderItem[],
-  priceItems: PriceItem[],
-  currency: string
-): Promise<MatchResult> {
-  const systemPrompt = `You are a procurement assistant. You will be given a list of ordered items and a price list.
-Your job is to match each ordered item to the best matching item in the price list using fuzzy matching — the names may differ slightly (abbreviations, different word order, typos, synonyms).
-
-Return ONLY a valid JSON object with this structure:
-{
-  "items": [
-    {
-      "name": "<original order item name>",
-      "quantity": <number>,
-      "unit": "<unit or null>",
-      "unitPrice": <price number or null if not found>,
-      "totalPrice": <unitPrice * quantity or null if not found>,
-      "found": <true or false>,
-      "matchedName": "<name as in price list or null>"
-    }
-  ],
-  "grandTotal": <sum of all totalPrices>,
-  "currency": "<currency>",
-  "notes": "<any notes about difficult matches, or null>"
+// Normalize string for comparison: lowercase, strip punctuation, collapse spaces
+function normalize(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^\wа-яёa-z0-9\s]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-Rules:
-- Match items as best you can, even with name variations
-- If an item cannot be found at all, set found=false, unitPrice=null, totalPrice=null, matchedName=null
-- grandTotal is the sum of all non-null totalPrices
-- Return ONLY the JSON, no extra text`;
+// Extract meaningful keywords from a string (words longer than 2 chars)
+function keywords(s: string): string[] {
+  return normalize(s)
+    .split(" ")
+    .filter((w) => w.length > 2);
+}
 
-  const userPrompt = `Currency: ${currency}
+// Score how well a price item matches an order item name
+function scoreMatch(orderName: string, priceName: string): number {
+  const orderKw = keywords(orderName);
+  const priceNorm = normalize(priceName);
 
-ORDER LIST:
-${orderItems.map((i, idx) => `${idx + 1}. ${i.name} — qty: ${i.quantity}${i.unit ? ` ${i.unit}` : ""}`).join("\n")}
+  if (orderKw.length === 0) return 0;
 
-PRICE LIST:
-${priceItems.map((i, idx) => `${idx + 1}. ${i.name} — ${i.price} ${i.unit ? `(${i.unit})` : ""}`).join("\n")}`;
+  let score = 0;
+  for (const kw of orderKw) {
+    if (priceNorm.includes(kw)) score++;
+  }
+  return score / orderKw.length;
+}
 
-  logger.info({ orderCount: orderItems.length, priceCount: priceItems.length }, "Calling DeepSeek AI for price matching");
+// For a given order item, find the top N most relevant price items
+function findCandidates(orderName: string, priceItems: PriceItem[], topN = 10): PriceItem[] {
+  const scored = priceItems
+    .map((p) => ({ item: p, score: scoreMatch(orderName, p.name) }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topN);
+
+  // If nothing scored, fall back to simple contains check
+  if (scored.length === 0) {
+    const normOrder = normalize(orderName).split(" ").filter((w) => w.length > 2);
+    return priceItems
+      .filter((p) => {
+        const pn = normalize(p.name);
+        return normOrder.some((kw) => pn.includes(kw.slice(0, 4)));
+      })
+      .slice(0, topN);
+  }
+
+  return scored.map((x) => x.item);
+}
+
+interface BatchOrderItem {
+  orderItem: OrderItem;
+  candidates: PriceItem[];
+}
+
+async function matchBatch(
+  batchItems: BatchOrderItem[],
+  currency: string
+): Promise<MatchedItem[]> {
+  const systemPrompt = `You are a procurement assistant doing fuzzy product name matching.
+For each order item, pick the best matching product from its candidate list.
+Names may differ: abbreviations, word order, typos, synonyms — use your judgment.
+
+Return ONLY a valid JSON array (no markdown, no extra text) with one object per order item:
+[
+  {
+    "name": "<original order item name>",
+    "quantity": <number>,
+    "unit": "<unit or null>",
+    "unitPrice": <price number or null if no good match>,
+    "totalPrice": <unitPrice * quantity or null>,
+    "found": <true or false>,
+    "matchedName": "<name as in candidates list or null>"
+  }
+]`;
+
+  const lines = batchItems.map((b, i) => {
+    const candidateList = b.candidates.length > 0
+      ? b.candidates.map((c) => `    - ${c.name}: ${c.price}${c.unit ? ` (${c.unit})` : ""}`).join("\n")
+      : "    (нет кандидатов)";
+    return `[${i + 1}] "${b.orderItem.name}" qty=${b.orderItem.quantity}${b.orderItem.unit ? ` ${b.orderItem.unit}` : ""}
+  Candidates:
+${candidateList}`;
+  });
+
+  const userPrompt = `Currency: ${currency}\n\n${lines.join("\n\n")}`;
 
   const response = await openai.chat.completions.create({
     model: "deepseek-chat",
-    max_tokens: 4096,
+    max_tokens: 8000,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
@@ -88,14 +134,63 @@ ${priceItems.map((i, idx) => `${idx + 1}. ${i.name} — ${i.price} ${i.unit ? `(
   });
 
   const content = response.choices[0]?.message?.content ?? "";
-  logger.info({ responseLength: content.length }, "AI response received");
 
-  // Extract JSON from the response (strip markdown code blocks if present)
-  const jsonMatch = content.match(/\{[\s\S]*\}/);
+  // Extract JSON array
+  const jsonMatch = content.match(/\[[\s\S]*\]/);
   if (!jsonMatch) {
-    throw new Error("AI did not return valid JSON");
+    throw new Error(`AI did not return a valid JSON array. Response snippet: ${content.slice(0, 200)}`);
   }
 
-  const result = JSON.parse(jsonMatch[0]) as MatchResult;
-  return result;
+  return JSON.parse(jsonMatch[0]) as MatchedItem[];
+}
+
+const BATCH_SIZE = 25;
+
+export async function matchPrices(
+  orderItems: OrderItem[],
+  priceItems: PriceItem[],
+  currency: string
+): Promise<MatchResult> {
+  logger.info(
+    { orderCount: orderItems.length, priceCount: priceItems.length },
+    "Starting price matching with pre-filtering"
+  );
+
+  // Pre-filter: for each order item find top candidates from price list
+  const batches: BatchOrderItem[][] = [];
+  const batchedItems: BatchOrderItem[] = orderItems.map((orderItem) => ({
+    orderItem,
+    candidates: findCandidates(orderItem.name, priceItems, 10),
+  }));
+
+  for (let i = 0; i < batchedItems.length; i += BATCH_SIZE) {
+    batches.push(batchedItems.slice(i, i + BATCH_SIZE));
+  }
+
+  logger.info({ batchCount: batches.length, batchSize: BATCH_SIZE }, "Processing batches");
+
+  const allMatched: MatchedItem[] = [];
+
+  for (let i = 0; i < batches.length; i++) {
+    const batch = batches[i];
+    logger.info({ batchIndex: i + 1, batchCount: batches.length }, "Processing batch");
+
+    const matched = await matchBatch(batch, currency);
+    allMatched.push(...matched);
+  }
+
+  const grandTotal = allMatched.reduce((sum, item) => sum + (item.totalPrice ?? 0), 0);
+  const notFoundCount = allMatched.filter((i) => !i.found).length;
+
+  const notes =
+    notFoundCount > 0
+      ? `${notFoundCount} из ${allMatched.length} позиций не найдено в прайс-листе`
+      : null;
+
+  return {
+    items: allMatched,
+    grandTotal,
+    currency,
+    notes,
+  };
 }
