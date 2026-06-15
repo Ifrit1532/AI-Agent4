@@ -1,26 +1,25 @@
 import { Router, type IRouter } from "express";
 import multer from "multer";
-import path from "path";
-import fs from "fs";
-import { matchPrices } from "../../lib/aiMatcher";
+import { matchPricesSSE } from "../../lib/aiMatcher";
 import { parsePriceList, parseOrderList, buildExcelFromResult } from "../../lib/fileParser";
 import { logger } from "../../lib/logger";
+import type { MatchResult } from "../../lib/aiMatcher";
 
 const router: IRouter = Router();
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 },
+  limits: { fileSize: 30 * 1024 * 1024 },
 });
 
-// In-memory store for download results (keyed by downloadId)
+// In-memory store for download results
 const downloadStore = new Map<string, Buffer>();
 
 function generateId(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-// POST /match — upload files and get matched result
+// POST /match — upload files, stream SSE progress, final result
 router.post(
   "/match",
   upload.fields([{ name: "priceFile", maxCount: 1 }, { name: "orderFile", maxCount: 1 }]),
@@ -32,10 +31,21 @@ router.post(
       return;
     }
 
+    // Set up SSE
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+
+    const send = (event: string, data: unknown) => {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
     const priceBuffer = files.priceFile[0].buffer;
     const orderBuffer = files.orderFile[0].buffer;
 
-    req.log.info("Parsing uploaded files");
+    send("status", { message: "Читаем файлы..." });
 
     let priceData: ReturnType<typeof parsePriceList>;
     let orderItems: ReturnType<typeof parseOrderList>;
@@ -45,43 +55,63 @@ router.post(
       orderItems = parseOrderList(orderBuffer);
     } catch (err) {
       req.log.error({ err }, "Failed to parse files");
-      res.status(400).json({ error: "Не удалось прочитать файлы. Убедитесь, что файлы в формате Excel или CSV." });
+      send("error", { error: "Не удалось прочитать файлы. Убедитесь, что файлы в формате Excel или CSV." });
+      res.end();
       return;
     }
 
     if (priceData.items.length === 0) {
-      res.status(400).json({ error: "Прайс-лист пуст или не удалось распознать данные. Проверьте формат файла." });
+      send("error", { error: "Прайс-лист пуст или не удалось распознать данные." });
+      res.end();
       return;
     }
 
     if (orderItems.length === 0) {
-      res.status(400).json({ error: "Список товаров пуст или не удалось распознать данные. Проверьте формат файла." });
+      send("error", { error: "Список товаров пуст или не удалось распознать данные." });
+      res.end();
       return;
     }
 
     req.log.info(
-      { priceItemCount: priceData.items.length, orderItemCount: orderItems.length, currency: priceData.currency },
-      "Files parsed successfully"
+      { priceItemCount: priceData.items.length, orderItemCount: orderItems.length },
+      "Files parsed"
     );
 
+    send("status", {
+      message: `Найдено ${orderItems.length} позиций. Начинаем подбор цен...`,
+      priceCount: priceData.items.length,
+      orderCount: orderItems.length,
+    });
+
     try {
-      const result = await matchPrices(orderItems, priceData.items, priceData.currency);
-      res.json(result);
+      const result = await matchPricesSSE(
+        orderItems,
+        priceData.items,
+        priceData.currency,
+        (batchIndex, totalBatches, batchSize) => {
+          send("progress", {
+            batchIndex,
+            totalBatches,
+            batchSize,
+            processed: Math.min(batchIndex * batchSize, orderItems.length),
+            total: orderItems.length,
+          });
+        }
+      );
+
+      send("result", result);
+      res.end();
     } catch (err) {
       req.log.error({ err }, "AI matching failed");
-      res.status(500).json({ error: "Ошибка ИИ при сопоставлении данных. Попробуйте ещё раз." });
+      send("error", { error: "Ошибка ИИ при сопоставлении данных. Попробуйте ещё раз." });
+      res.end();
     }
   }
 );
 
-// POST /match/download — generate Excel and return a downloadId
+// POST /match/download — generate Excel, return downloadId
 router.post("/match/download", async (req, res): Promise<void> => {
-  const body = req.body as {
-    items?: unknown[];
-    grandTotal?: number;
-    currency?: string;
-    notes?: string | null;
-  };
+  const body = req.body as MatchResult & { items?: unknown[] };
 
   if (!body?.items || !Array.isArray(body.items)) {
     res.status(400).json({ error: "Некорректные данные для формирования файла" });
@@ -103,7 +133,7 @@ router.post("/match/download", async (req, res): Promise<void> => {
   }
 });
 
-// GET /match/download/:id — download the Excel file
+// GET /match/download/:id — stream the Excel file
 router.get("/match/download/:id", async (req, res): Promise<void> => {
   const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const buffer = downloadStore.get(raw);
