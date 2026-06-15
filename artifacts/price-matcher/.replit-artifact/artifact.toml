@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Матчинг прайса"
+version = "1.0.0"
+id = "artifacts/price-matcher"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 19829
+
+[services.development]
+run = "pnpm --filter @workspace/price-matcher run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/price-matcher", "run", "build" ]
+publicDir = "artifacts/price-matcher/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "19829"
+BASE_PATH = "/"
