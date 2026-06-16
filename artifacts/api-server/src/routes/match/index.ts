@@ -4,6 +4,7 @@ import { matchPricesSSE } from "../../lib/aiMatcher";
 import { parsePriceList, parseOrderList, buildExcelFromResult } from "../../lib/fileParser";
 import { logger } from "../../lib/logger";
 import type { MatchResult } from "../../lib/aiMatcher";
+import { hashFiles, getCached, setCached } from "../../lib/resultCache";
 
 const router: IRouter = Router();
 
@@ -45,6 +46,20 @@ router.post(
     const priceBuffer = files.priceFile[0].buffer;
     const orderBuffer = files.orderFile[0].buffer;
 
+    // Check cache first
+    send("status", { message: "Проверяем кеш..." });
+    const cacheKey = hashFiles(priceBuffer, orderBuffer);
+    const cached = getCached(cacheKey);
+
+    if (cached) {
+      req.log.info({ cacheKey: cacheKey.slice(0, 8) }, "Cache hit — returning cached result");
+      send("cached", { message: "Результат найден в кеше" });
+      send("result", cached);
+      res.end();
+      return;
+    }
+
+    // Parse files
     send("status", { message: "Читаем файлы..." });
 
     let priceData: ReturnType<typeof parsePriceList>;
@@ -98,6 +113,10 @@ router.post(
           });
         }
       );
+
+      // Store in cache
+      setCached(cacheKey, result);
+      req.log.info({ cacheKey: cacheKey.slice(0, 8) }, "Result cached");
 
       send("result", result);
       res.end();

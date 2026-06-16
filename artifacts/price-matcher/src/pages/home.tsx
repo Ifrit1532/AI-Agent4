@@ -64,6 +64,7 @@ export default function Home() {
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [result, setResult] = useState<MatchResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [fromCache, setFromCache] = useState(false);
 
   const downloadMutation = useDownloadMatchResult();
 
@@ -81,6 +82,7 @@ export default function Home() {
     setError(null);
     setResult(null);
     setProgress(null);
+    setFromCache(false);
 
     try {
       const formData = new FormData();
@@ -116,6 +118,13 @@ export default function Home() {
             totalBatches: (d.totalBatches as number) || 0,
             message: `Батч ${d.batchIndex as number} из ${d.totalBatches as number}...`,
           });
+        } else if (event === "cached") {
+          setProgress(null);
+          toast({
+            title: "Из кеша",
+            description: "Результат загружен мгновенно из кеша",
+          });
+          setFromCache(true);
         } else if (event === "result") {
           setResult(data as MatchResult);
           setProgress(null);
@@ -157,6 +166,7 @@ export default function Home() {
     setResult(null);
     setError(null);
     setProgress(null);
+    setFromCache(false);
   };
 
   const progressPercent =
@@ -283,7 +293,14 @@ export default function Home() {
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <div className="flex items-center justify-between">
               <div>
-                <h2 className="text-2xl font-semibold tracking-tight">Результаты сопоставления</h2>
+                <div className="flex items-center gap-3">
+                  <h2 className="text-2xl font-semibold tracking-tight">Результаты сопоставления</h2>
+                  {fromCache && (
+                    <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400 dark:border-blue-800 font-medium">
+                      Из кеша
+                    </Badge>
+                  )}
+                </div>
                 {result.notes && (
                   <p className="text-sm text-muted-foreground mt-1">{result.notes}</p>
                 )}
