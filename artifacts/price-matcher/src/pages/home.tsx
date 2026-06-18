@@ -549,7 +549,7 @@ export default function Home() {
                 <Table>
                   <TableHeader className="bg-muted/50">
                     <TableRow>
-                      <TableHead className="w-[220px] font-medium text-muted-foreground">Наименование</TableHead>
+                      <TableHead className="font-medium text-muted-foreground min-w-[160px]">Наименование</TableHead>
                       <TableHead className="w-[130px] font-medium text-muted-foreground">Арт. / Код</TableHead>
                       <TableHead className="font-medium text-muted-foreground">Совпадение в прайсе</TableHead>
                       <TableHead className="w-[110px] font-medium text-muted-foreground">Арт. прайса</TableHead>
@@ -582,7 +582,9 @@ export default function Home() {
 
                       return (
                         <TableRow key={idx} className={rowBg}>
-                          <TableCell className="font-medium text-sm py-2">{item.name}</TableCell>
+                          <TableCell className="py-2 max-w-[220px]">
+                            <div className="truncate font-medium text-sm" title={item.name}>{item.name}</div>
+                          </TableCell>
 
                           <TableCell className="py-2">
                             {isNotFound ? (
