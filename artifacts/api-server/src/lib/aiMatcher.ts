@@ -57,7 +57,6 @@ function normalize(s: string): string {
 }
 
 function normalizeCode(a: string): string {
-  // Strip separators so "40X-8080", "40X_8080", "40X8080" all match
   return a.toLowerCase().replace(/[\s\-._]/g, "");
 }
 
@@ -69,22 +68,13 @@ function keywords(s: string): string[] {
 
 // ─── Product code extraction ───────────────────────────────────────────────────
 
-/**
- * Extract product/part codes embedded in a free-text product name.
- * Matches tokens that look like model numbers or part numbers:
- *   - Mixed letter+digit, at least 4 meaningful chars: 40X8080, CF226X, TK-3170
- *   - Pure numeric, at least 5 digits: 12345
- *   - May include internal dashes, dots, or underscores: 106R-03623, CF226X
- */
 export function extractProductCodes(name: string): string[] {
   const raw = name.match(/\b[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*\b/g) ?? [];
   return raw.filter((t) => {
     const stripped = t.replace(/[-_.]/g, "");
     const hasLetter = /[A-Za-z]/.test(stripped);
     const hasDigit = /[0-9]/.test(stripped);
-    // Mixed alphanumeric, at least 4 chars
     if (hasLetter && hasDigit && stripped.length >= 4) return true;
-    // Pure numeric, at least 5 digits
     if (!hasLetter && hasDigit && stripped.length >= 5) return true;
     return false;
   });
@@ -101,7 +91,6 @@ interface ScoredCandidate {
 function scoreCandidate(orderItem: OrderItem, priceItem: PriceItem): ScoredCandidate {
   const pa = priceItem.article ? normalizeCode(priceItem.article) : null;
 
-  // 1. Explicit article field on order item vs price article
   if (orderItem.article && pa) {
     const oa = normalizeCode(orderItem.article);
     if (oa === pa && oa.length > 0) {
@@ -112,7 +101,6 @@ function scoreCandidate(orderItem: OrderItem, priceItem: PriceItem): ScoredCandi
     }
   }
 
-  // 2. Extract product codes from order name, match against price article
   if (pa) {
     const codes = extractProductCodes(orderItem.name);
     for (const code of codes) {
@@ -125,26 +113,22 @@ function scoreCandidate(orderItem: OrderItem, priceItem: PriceItem): ScoredCandi
       }
     }
 
-    // Also check codes against the price item name (in case article is in the name)
     const priceNameNorm = normalize(priceItem.name);
     const orderCodes = extractProductCodes(orderItem.name);
     const priceCodes = extractProductCodes(priceItem.name);
     for (const oc of orderCodes) {
       const nc = normalizeCode(oc);
-      // Check against article column already done above; now check price name codes
       for (const pc of priceCodes) {
         if (nc === normalizeCode(pc) && nc.length >= 4) {
           return { item: priceItem, score: 2.0, matchMethod: "embedded_code" };
         }
       }
-      // Check if the code appears literally in the price name string
       if (nc.length >= 4 && priceNameNorm.replace(/[\s\-._]/g, "").includes(nc)) {
         return { item: priceItem, score: 1.8, matchMethod: "embedded_code" };
       }
     }
   }
 
-  // 3. Also check codes from order name against price name directly (no article col)
   const orderCodes = extractProductCodes(orderItem.name);
   if (orderCodes.length > 0) {
     const priceNameFlat = normalize(priceItem.name).replace(/[\s\-._]/g, "");
@@ -154,7 +138,6 @@ function scoreCandidate(orderItem: OrderItem, priceItem: PriceItem): ScoredCandi
         return { item: priceItem, score: 1.8, matchMethod: "embedded_code" };
       }
     }
-    // Check price codes extracted from price name
     const priceCodes = extractProductCodes(priceItem.name);
     for (const oc of orderCodes) {
       const nc = normalizeCode(oc);
@@ -166,7 +149,6 @@ function scoreCandidate(orderItem: OrderItem, priceItem: PriceItem): ScoredCandi
     }
   }
 
-  // 4. Keyword-based name matching
   const orderKw = keywords(orderItem.name);
   const priceNorm = normalize(priceItem.name);
   if (orderKw.length === 0) return { item: priceItem, score: 0, matchMethod: "none" };
@@ -183,65 +165,289 @@ function scoreCandidate(orderItem: OrderItem, priceItem: PriceItem): ScoredCandi
   };
 }
 
-function findCandidates(
-  orderItem: OrderItem,
-  priceItems: PriceItem[],
-  topN = 12
-): { candidates: PriceItem[]; extractedCodes: string[] } {
-  const extractedCodes = extractProductCodes(orderItem.name);
+// ─── Inverted index for fast candidate lookup ─────────────────────────────────
 
-  const scored: ScoredCandidate[] = priceItems
-    .map((p) => scoreCandidate(orderItem, p))
-    .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topN);
-
-  // If nothing scored, try prefix fallback
-  if (scored.length === 0) {
-    const normOrder = normalize(orderItem.name).split(" ").filter((w) => w.length > 2);
-    const fallback = priceItems
-      .filter((p) => {
-        const pn = normalize(p.name);
-        return normOrder.some((kw) => pn.includes(kw.slice(0, 4)));
-      })
-      .slice(0, topN);
-    return { candidates: fallback, extractedCodes };
-  }
-
-  return { candidates: scored.map((x) => x.item), extractedCodes };
+interface PriceItemIndex {
+  items: PriceItem[];
+  byArticle: Map<string, number[]>;
+  byCodeInName: Map<string, number[]>;
+  byKeyword: Map<string, number[]>;
 }
 
-// ─── Dual price list helpers ──────────────────────────────────────────────────
+function buildPriceIndex(items: PriceItem[]): PriceItemIndex {
+  const byArticle = new Map<string, number[]>();
+  const byCodeInName = new Map<string, number[]>();
+  const byKeyword = new Map<string, number[]>();
 
-function findCandidatesDual(
-  orderItem: OrderItem,
-  priceItems1: PriceItem[],
-  priceItems2: PriceItem[],
-  topN = 12
-): { candidates: TaggedPriceItem[]; extractedCodes: string[] } {
-  const extractedCodes = extractProductCodes(orderItem.name);
-  const tagged1: TaggedPriceItem[] = priceItems1.map((p) => ({ ...p, _source: 1 as const }));
-  const tagged2: TaggedPriceItem[] = priceItems2.map((p) => ({ ...p, _source: 2 as const }));
-  const all: TaggedPriceItem[] = [...tagged1, ...tagged2];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!;
 
-  const scored = all
-    .map((p) => ({ scored: scoreCandidate(orderItem, p), taggedItem: p }))
-    .filter((x) => x.scored.score > 0)
-    .sort((a, b) => b.scored.score - a.scored.score)
-    .slice(0, topN);
+    if (item.article) {
+      const key = normalizeCode(item.article);
+      if (key.length >= 2) {
+        let b = byArticle.get(key);
+        if (!b) { b = []; byArticle.set(key, b); }
+        b.push(i);
+      }
+    }
 
-  if (scored.length === 0) {
-    const normOrder = normalize(orderItem.name).split(" ").filter((w) => w.length > 2);
-    const fallback = all
-      .filter((p) => {
-        const pn = normalize(p.name);
-        return normOrder.some((kw) => pn.includes(kw.slice(0, 4)));
-      })
-      .slice(0, topN);
-    return { candidates: fallback, extractedCodes };
+    for (const code of extractProductCodes(item.name)) {
+      const key = normalizeCode(code);
+      let b = byCodeInName.get(key);
+      if (!b) { b = []; byCodeInName.set(key, b); }
+      b.push(i);
+    }
+
+    for (const kw of keywords(item.name)) {
+      let b = byKeyword.get(kw);
+      if (!b) { b = []; byKeyword.set(kw, b); }
+      b.push(i);
+    }
   }
 
-  return { candidates: scored.map((x) => x.taggedItem), extractedCodes };
+  return { items, byArticle, byCodeInName, byKeyword };
+}
+
+// Per-keyword bucket cap: avoids O(N) on very common words like "картридж"
+const KW_BUCKET_CAP = 300;
+
+function findFromIndex(
+  orderItem: OrderItem,
+  index: PriceItemIndex,
+  topN = 12,
+): { candidates: PriceItem[]; extractedCodes: string[] } {
+  const extractedCodes = extractProductCodes(orderItem.name);
+  const { items, byArticle, byCodeInName, byKeyword } = index;
+  const candidateSet = new Set<number>();
+
+  // 1. Exact article lookup
+  if (orderItem.article) {
+    const oa = normalizeCode(orderItem.article);
+    if (oa.length >= 2) {
+      for (const idx of byArticle.get(oa) ?? []) candidateSet.add(idx);
+    }
+  }
+
+  // 2. Embedded codes → article index + code-in-name index
+  for (const code of extractedCodes) {
+    const nc = normalizeCode(code);
+    if (nc.length < 4) continue;
+    for (const idx of byArticle.get(nc) ?? []) candidateSet.add(idx);
+    for (const idx of byCodeInName.get(nc) ?? []) candidateSet.add(idx);
+  }
+
+  // 3. Keyword hits — take top-50 by hit count
+  const orderKws = keywords(orderItem.name);
+  const kwHits = new Map<number, number>();
+  for (const kw of orderKws) {
+    const bucket = byKeyword.get(kw);
+    if (!bucket) continue;
+    const lim = Math.min(bucket.length, KW_BUCKET_CAP);
+    for (let j = 0; j < lim; j++) {
+      const idx = bucket[j]!;
+      kwHits.set(idx, (kwHits.get(idx) ?? 0) + 1);
+    }
+  }
+  const kwTop = [...kwHits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 50);
+  for (const [idx] of kwTop) candidateSet.add(idx);
+
+  // 4. Prefix fallback if index returned nothing
+  if (candidateSet.size === 0) {
+    const normKws = orderKws.filter((w) => w.length > 2);
+    for (let i = 0; i < items.length && candidateSet.size < 50; i++) {
+      if (normKws.some((kw) => normalize(items[i]!.name).includes(kw.slice(0, 4)))) {
+        candidateSet.add(i);
+      }
+    }
+  }
+
+  // Score only the candidates found via index
+  const scored: ScoredCandidate[] = [];
+  for (const idx of candidateSet) {
+    const s = scoreCandidate(orderItem, items[idx]!);
+    if (s.score > 0) scored.push(s);
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return { candidates: scored.slice(0, topN).map((x) => x.item), extractedCodes };
+}
+
+// ─── Dual price list index ────────────────────────────────────────────────────
+
+interface TaggedPriceItemIndex {
+  items: TaggedPriceItem[];
+  byArticle: Map<string, number[]>;
+  byCodeInName: Map<string, number[]>;
+  byKeyword: Map<string, number[]>;
+}
+
+function buildTaggedIndex(items1: PriceItem[], items2: PriceItem[]): TaggedPriceItemIndex {
+  const tagged: TaggedPriceItem[] = [
+    ...items1.map((p) => ({ ...p, _source: 1 as const })),
+    ...items2.map((p) => ({ ...p, _source: 2 as const })),
+  ];
+
+  const byArticle = new Map<string, number[]>();
+  const byCodeInName = new Map<string, number[]>();
+  const byKeyword = new Map<string, number[]>();
+
+  for (let i = 0; i < tagged.length; i++) {
+    const item = tagged[i]!;
+
+    if (item.article) {
+      const key = normalizeCode(item.article);
+      if (key.length >= 2) {
+        let b = byArticle.get(key);
+        if (!b) { b = []; byArticle.set(key, b); }
+        b.push(i);
+      }
+    }
+
+    for (const code of extractProductCodes(item.name)) {
+      const key = normalizeCode(code);
+      let b = byCodeInName.get(key);
+      if (!b) { b = []; byCodeInName.set(key, b); }
+      b.push(i);
+    }
+
+    for (const kw of keywords(item.name)) {
+      let b = byKeyword.get(kw);
+      if (!b) { b = []; byKeyword.set(kw, b); }
+      b.push(i);
+    }
+  }
+
+  return { items: tagged, byArticle, byCodeInName, byKeyword };
+}
+
+function findDualFromIndex(
+  orderItem: OrderItem,
+  index: TaggedPriceItemIndex,
+  topN = 12,
+): { candidates: TaggedPriceItem[]; extractedCodes: string[] } {
+  const extractedCodes = extractProductCodes(orderItem.name);
+  const { items, byArticle, byCodeInName, byKeyword } = index;
+  const candidateSet = new Set<number>();
+
+  if (orderItem.article) {
+    const oa = normalizeCode(orderItem.article);
+    if (oa.length >= 2) {
+      for (const idx of byArticle.get(oa) ?? []) candidateSet.add(idx);
+    }
+  }
+
+  for (const code of extractedCodes) {
+    const nc = normalizeCode(code);
+    if (nc.length < 4) continue;
+    for (const idx of byArticle.get(nc) ?? []) candidateSet.add(idx);
+    for (const idx of byCodeInName.get(nc) ?? []) candidateSet.add(idx);
+  }
+
+  const orderKws = keywords(orderItem.name);
+  const kwHits = new Map<number, number>();
+  for (const kw of orderKws) {
+    const bucket = byKeyword.get(kw);
+    if (!bucket) continue;
+    const lim = Math.min(bucket.length, KW_BUCKET_CAP);
+    for (let j = 0; j < lim; j++) {
+      const idx = bucket[j]!;
+      kwHits.set(idx, (kwHits.get(idx) ?? 0) + 1);
+    }
+  }
+  const kwTop = [...kwHits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 50);
+  for (const [idx] of kwTop) candidateSet.add(idx);
+
+  if (candidateSet.size === 0) {
+    const normKws = orderKws.filter((w) => w.length > 2);
+    for (let i = 0; i < items.length && candidateSet.size < 50; i++) {
+      if (normKws.some((kw) => normalize(items[i]!.name).includes(kw.slice(0, 4)))) {
+        candidateSet.add(i);
+      }
+    }
+  }
+
+  const scored: Array<{ item: TaggedPriceItem; score: number }> = [];
+  for (const idx of candidateSet) {
+    const item = items[idx]!;
+    const s = scoreCandidate(orderItem, item);
+    if (s.score > 0) scored.push({ item, score: s.score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return { candidates: scored.slice(0, topN).map((x) => x.item), extractedCodes };
+}
+
+// ─── AI batch processing ──────────────────────────────────────────────────────
+
+interface BatchOrderItem {
+  orderItem: OrderItem;
+  candidates: PriceItem[];
+  extractedCodes: string[];
+}
+
+async function matchBatch(batchItems: BatchOrderItem[], currency: string): Promise<MatchedItem[]> {
+  const systemPrompt = `You are a procurement assistant doing fuzzy product matching.
+
+Rules:
+1. If an order item name contains an embedded product/part code (e.g. "Блок лазера Lexmark 40X8080" → code "40X8080"), prioritize candidates where that code matches the article or appears in the name.
+2. If an explicit article is given for the order item, prioritize article match over name similarity.
+3. Otherwise match by name similarity (abbreviations, synonyms, word order OK).
+
+Return ONLY a valid JSON array (no markdown, no extra text) with exactly one object per order item, in the same order:
+[
+  {
+    "name": "<original order item name>",
+    "article": "<original order item article or null>",
+    "extractedCodes": ["<code1>", ...],
+    "quantity": <number>,
+    "unit": "<unit or null>",
+    "unitPrice": <price or null if no good match>,
+    "totalPrice": <unitPrice * quantity or null>,
+    "found": <true or false>,
+    "matchMethod": "<article|embedded_code|name|none>",
+    "matchedName": "<matched candidate name or null>",
+    "matchedArticle": "<matched candidate article or null>"
+  }
+]`;
+
+  const lines = batchItems.map((b, i) => {
+    const artPart = b.orderItem.article ? ` арт.=${b.orderItem.article}` : "";
+    const codesPart =
+      b.extractedCodes.length > 0
+        ? ` [коды в названии: ${b.extractedCodes.join(", ")}]`
+        : "";
+    const candidateList =
+      b.candidates.length > 0
+        ? b.candidates
+            .map((c) => {
+              const artStr = c.article ? ` [арт: ${c.article}]` : "";
+              const unitStr = c.unit ? ` (${c.unit})` : "";
+              return `    - ${c.name}${artStr}: ${c.price}${unitStr}`;
+            })
+            .join("\n")
+        : "    (нет кандидатов)";
+
+    return `[${i + 1}] "${b.orderItem.name}"${artPart}${codesPart} qty=${b.orderItem.quantity}${b.orderItem.unit ? ` ${b.orderItem.unit}` : ""}
+  Candidates:
+${candidateList}`;
+  });
+
+  const userPrompt = `Currency: ${currency}\n\n${lines.join("\n\n")}`;
+
+  const response = await openai.chat.completions.create({
+    model: "deepseek-chat",
+    max_tokens: 8000,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+  });
+
+  const content = response.choices[0]?.message?.content ?? "";
+  const jsonMatch = content.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) {
+    throw new Error(`AI did not return a valid JSON array. Snippet: ${content.slice(0, 200)}`);
+  }
+
+  return JSON.parse(jsonMatch[0]) as MatchedItem[];
 }
 
 interface BatchOrderItemDual {
@@ -320,82 +526,7 @@ ${candidateList}`;
   return JSON.parse(jsonMatch[0]) as MatchedItem[];
 }
 
-// ─── AI batch processing ──────────────────────────────────────────────────────
-
-interface BatchOrderItem {
-  orderItem: OrderItem;
-  candidates: PriceItem[];
-  extractedCodes: string[];
-}
-
-async function matchBatch(batchItems: BatchOrderItem[], currency: string): Promise<MatchedItem[]> {
-  const systemPrompt = `You are a procurement assistant doing fuzzy product matching.
-
-Rules:
-1. If an order item name contains an embedded product/part code (e.g. "Блок лазера Lexmark 40X8080" → code "40X8080"), prioritize candidates where that code matches the article or appears in the name.
-2. If an explicit article is given for the order item, prioritize article match over name similarity.
-3. Otherwise match by name similarity (abbreviations, synonyms, word order OK).
-
-Return ONLY a valid JSON array (no markdown, no extra text) with exactly one object per order item, in the same order:
-[
-  {
-    "name": "<original order item name>",
-    "article": "<original order item article or null>",
-    "extractedCodes": ["<code1>", ...],
-    "quantity": <number>,
-    "unit": "<unit or null>",
-    "unitPrice": <price or null if no good match>,
-    "totalPrice": <unitPrice * quantity or null>,
-    "found": <true or false>,
-    "matchMethod": "<article|embedded_code|name|none>",
-    "matchedName": "<matched candidate name or null>",
-    "matchedArticle": "<matched candidate article or null>"
-  }
-]`;
-
-  const lines = batchItems.map((b, i) => {
-    const artPart = b.orderItem.article ? ` арт.=${b.orderItem.article}` : "";
-    const codesPart =
-      b.extractedCodes.length > 0
-        ? ` [коды в названии: ${b.extractedCodes.join(", ")}]`
-        : "";
-    const candidateList =
-      b.candidates.length > 0
-        ? b.candidates
-            .map((c) => {
-              const artStr = c.article ? ` [арт: ${c.article}]` : "";
-              const unitStr = c.unit ? ` (${c.unit})` : "";
-              return `    - ${c.name}${artStr}: ${c.price}${unitStr}`;
-            })
-            .join("\n")
-        : "    (нет кандидатов)";
-
-    return `[${i + 1}] "${b.orderItem.name}"${artPart}${codesPart} qty=${b.orderItem.quantity}${b.orderItem.unit ? ` ${b.orderItem.unit}` : ""}
-  Candidates:
-${candidateList}`;
-  });
-
-  const userPrompt = `Currency: ${currency}\n\n${lines.join("\n\n")}`;
-
-  const response = await openai.chat.completions.create({
-    model: "deepseek-chat",
-    max_tokens: 8000,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-  });
-
-  const content = response.choices[0]?.message?.content ?? "";
-  const jsonMatch = content.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) {
-    throw new Error(`AI did not return a valid JSON array. Snippet: ${content.slice(0, 200)}`);
-  }
-
-  return JSON.parse(jsonMatch[0]) as MatchedItem[];
-}
-
-// ─── Main entry point ─────────────────────────────────────────────────────────
+// ─── Main entry points ─────────────────────────────────────────────────────────
 
 const BATCH_SIZE = 25;
 
@@ -410,8 +541,11 @@ export async function matchPricesSSE(
     "Starting price matching"
   );
 
+  // Build index once — O(N) — then each order item only scores its small candidate set
+  const index = buildPriceIndex(priceItems);
+
   const batchedItems: BatchOrderItem[] = orderItems.map((orderItem) => {
-    const { candidates, extractedCodes } = findCandidates(orderItem, priceItems, 12);
+    const { candidates, extractedCodes } = findFromIndex(orderItem, index, 12);
     return { orderItem, candidates, extractedCodes };
   });
 
@@ -427,7 +561,7 @@ export async function matchPricesSSE(
   for (let i = 0; i < batches.length; i++) {
     logger.info({ batchIndex: i + 1, batchCount: batches.length }, "Processing batch");
     onProgress(i + 1, batches.length, BATCH_SIZE);
-    const matched = await matchBatch(batches[i], currency);
+    const matched = await matchBatch(batches[i]!, currency);
     allMatched.push(...matched);
   }
 
@@ -441,8 +575,6 @@ export async function matchPricesSSE(
   return { items: allMatched, grandTotal, currency, notes };
 }
 
-// ─── Dual price list entry point ──────────────────────────────────────────────
-
 export async function matchPricesSSEDual(
   orderItems: OrderItem[],
   priceItems1: PriceItem[],
@@ -455,8 +587,11 @@ export async function matchPricesSSEDual(
     "Starting dual price matching"
   );
 
+  // Build combined tagged index once — avoids re-tagging 18k+ items per order item
+  const index = buildTaggedIndex(priceItems1, priceItems2);
+
   const batchedItems: BatchOrderItemDual[] = orderItems.map((orderItem) => {
-    const { candidates, extractedCodes } = findCandidatesDual(orderItem, priceItems1, priceItems2, 12);
+    const { candidates, extractedCodes } = findDualFromIndex(orderItem, index, 12);
     return { orderItem, candidates, extractedCodes };
   });
 
@@ -472,7 +607,7 @@ export async function matchPricesSSEDual(
   for (let i = 0; i < batches.length; i++) {
     logger.info({ batchIndex: i + 1, batchCount: batches.length }, "Processing dual batch");
     onProgress(i + 1, batches.length, BATCH_SIZE);
-    const matched = await matchBatchDual(batches[i], currency);
+    const matched = await matchBatchDual(batches[i]!, currency);
     allMatched.push(...matched);
   }
 

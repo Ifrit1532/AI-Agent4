@@ -15,7 +15,7 @@ function toNumber(val: unknown): number {
 }
 
 function detectCurrency(rows: Record<string, unknown>[]): string {
-  const text = JSON.stringify(rows).slice(0, 50000);
+  const text = JSON.stringify(rows.slice(0, 100)).slice(0, 10000);
   if (/руб|rub|₽/i.test(text)) return "RUB";
   if (/uah|грн/i.test(text)) return "UAH";
   if (/usd|\$/i.test(text)) return "USD";
@@ -81,8 +81,6 @@ function isQtyHeader(h: string): boolean {
 function allSheetsToRows(buffer: Buffer): Record<string, unknown>[] {
   const workbook = XLSX.read(buffer, {
     type: "buffer",
-    // cellStyles: needed to detect hidden rows via !rows metadata
-    cellStyles: true,
   });
 
   const allRows: Record<string, unknown>[] = [];
@@ -111,7 +109,7 @@ function allSheetsToRows(buffer: Buffer): Record<string, unknown>[] {
  * Read only the first sheet (used for order files which are typically single-sheet).
  */
 function firstSheetToRows(buffer: Buffer): Record<string, unknown>[] {
-  const workbook = XLSX.read(buffer, { type: "buffer", cellStyles: true });
+  const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheetName = workbook.SheetNames[0];
   if (!sheetName) return [];
   const sheet = workbook.Sheets[sheetName];
@@ -163,7 +161,7 @@ function buildColumnsAndRows(
   buffer: Buffer,
   multiSheet: boolean,
 ): { columns: string[]; rows: Record<string, unknown>[]; headerRowIndex: number } {
-  const workbook = XLSX.read(buffer, { type: "buffer", cellStyles: true });
+  const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheetNames = (
     multiSheet ? workbook.SheetNames : [workbook.SheetNames[0]].filter(Boolean)
   ) as string[];
