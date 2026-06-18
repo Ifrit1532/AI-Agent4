@@ -324,64 +324,80 @@ export default function Home() {
                 <Table>
                   <TableHeader className="bg-muted/50">
                     <TableRow>
-                      <TableHead className="w-[260px] font-medium text-muted-foreground">Наименование</TableHead>
-                      <TableHead className="w-[110px] font-medium text-muted-foreground">Артикул</TableHead>
+                      <TableHead className="w-[240px] font-medium text-muted-foreground">Наименование</TableHead>
+                      <TableHead className="w-[120px] font-medium text-muted-foreground">Арт. / Код</TableHead>
                       <TableHead className="font-medium text-muted-foreground">Совпадение в прайсе</TableHead>
                       <TableHead className="w-[110px] font-medium text-muted-foreground">Арт. прайса</TableHead>
-                      <TableHead className="text-right font-medium text-muted-foreground w-[80px]">Кол-во</TableHead>
-                      <TableHead className="font-medium text-muted-foreground w-[70px]">Ед.</TableHead>
+                      <TableHead className="text-right font-medium text-muted-foreground w-[70px]">Кол-во</TableHead>
+                      <TableHead className="font-medium text-muted-foreground w-[60px]">Ед.</TableHead>
                       <TableHead className="text-right font-medium text-muted-foreground w-[110px]">Цена за ед.</TableHead>
                       <TableHead className="text-right font-medium text-muted-foreground w-[110px]">Сумма</TableHead>
-                      <TableHead className="text-center font-medium text-muted-foreground w-[100px]">Статус</TableHead>
+                      <TableHead className="text-center font-medium text-muted-foreground w-[110px]">Статус</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {result.items.map((item, idx) => (
-                      <TableRow
-                        key={idx}
-                        className={!item.found ? "bg-amber-50/50 dark:bg-amber-950/20" : ""}
-                      >
-                        <TableCell className="font-medium">{item.name}</TableCell>
-                        <TableCell className="text-muted-foreground text-xs font-mono">
-                          {(item as unknown as { article?: string | null }).article || "-"}
-                        </TableCell>
-                        <TableCell className="text-muted-foreground text-sm">
-                          {item.matchedName || "-"}
-                        </TableCell>
-                        <TableCell className="text-muted-foreground text-xs font-mono">
-                          {(item as unknown as { matchedArticle?: string | null }).matchedArticle || "-"}
-                        </TableCell>
-                        <TableCell className="text-right">{item.quantity}</TableCell>
-                        <TableCell>{item.unit || "-"}</TableCell>
-                        <TableCell className="text-right font-medium">
-                          {item.unitPrice != null
-                            ? item.unitPrice.toLocaleString("ru-RU")
-                            : "-"}
-                        </TableCell>
-                        <TableCell className="text-right font-semibold">
-                          {item.totalPrice != null
-                            ? item.totalPrice.toLocaleString("ru-RU")
-                            : "-"}
-                        </TableCell>
-                        <TableCell className="text-center">
-                          {item.found ? (
-                            <Badge
-                              variant="outline"
-                              className="bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-400 dark:border-emerald-800 font-medium"
-                            >
-                              Найден
-                            </Badge>
-                          ) : (
-                            <Badge
-                              variant="outline"
-                              className="bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-800 font-medium"
-                            >
-                              Не найден
-                            </Badge>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    ))}
+                    {result.items.map((item, idx) => {
+                      type RichItem = typeof item & {
+                        article?: string | null;
+                        extractedCodes?: string[];
+                        matchMethod?: "article" | "embedded_code" | "name" | "none";
+                        matchedArticle?: string | null;
+                      };
+                      const rich = item as RichItem;
+                      const method = rich.matchMethod ?? (item.found ? "name" : "none");
+                      const displayCode = rich.article || (rich.extractedCodes?.length ? rich.extractedCodes.join(", ") : null);
+
+                      const rowBg =
+                        !item.found
+                          ? "bg-amber-50/50 dark:bg-amber-950/20"
+                          : method === "article" || method === "embedded_code"
+                          ? "bg-emerald-50/30 dark:bg-emerald-950/10"
+                          : "";
+
+                      const methodBadge = item.found ? (
+                        method === "article" ? (
+                          <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-400 dark:border-emerald-800 font-medium text-[11px]">
+                            По артикулу
+                          </Badge>
+                        ) : method === "embedded_code" ? (
+                          <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400 dark:border-blue-800 font-medium text-[11px]">
+                            По коду
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline" className="bg-slate-50 text-slate-600 border-slate-200 dark:bg-slate-950/30 dark:text-slate-400 dark:border-slate-700 font-medium text-[11px]">
+                            По названию
+                          </Badge>
+                        )
+                      ) : (
+                        <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-800 font-medium text-[11px]">
+                          Не найден
+                        </Badge>
+                      );
+
+                      return (
+                        <TableRow key={idx} className={rowBg}>
+                          <TableCell className="font-medium text-sm">{item.name}</TableCell>
+                          <TableCell className="text-muted-foreground text-xs font-mono">
+                            {displayCode || "-"}
+                          </TableCell>
+                          <TableCell className="text-muted-foreground text-sm">
+                            {item.matchedName || "-"}
+                          </TableCell>
+                          <TableCell className="text-muted-foreground text-xs font-mono">
+                            {rich.matchedArticle || "-"}
+                          </TableCell>
+                          <TableCell className="text-right">{item.quantity}</TableCell>
+                          <TableCell>{item.unit || "-"}</TableCell>
+                          <TableCell className="text-right font-medium">
+                            {item.unitPrice != null ? item.unitPrice.toLocaleString("ru-RU") : "-"}
+                          </TableCell>
+                          <TableCell className="text-right font-semibold">
+                            {item.totalPrice != null ? item.totalPrice.toLocaleString("ru-RU") : "-"}
+                          </TableCell>
+                          <TableCell className="text-center">{methodBadge}</TableCell>
+                        </TableRow>
+                      );
+                    })}
                   </TableBody>
                 </Table>
               </div>
