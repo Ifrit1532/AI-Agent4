@@ -134,12 +134,13 @@ export default function Home() {
     resizingRef.current = { colIdx, startX: e.clientX, startWidth };
 
     const onMove = (ev: MouseEvent) => {
-      if (!resizingRef.current) return;
-      const diff = ev.clientX - resizingRef.current.startX;
-      const newWidth = Math.max(50, resizingRef.current.startWidth + diff);
+      const resizing = resizingRef.current;
+      if (!resizing) return;
+      const diff = ev.clientX - resizing.startX;
+      const newWidth = Math.max(50, resizing.startWidth + diff);
       setColWidths((prev) => {
         const next = [...prev];
-        next[resizingRef.current!.colIdx] = newWidth;
+        next[resizing.colIdx] = newWidth;
         return next;
       });
     };
