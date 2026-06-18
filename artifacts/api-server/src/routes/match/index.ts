@@ -4,7 +4,7 @@ import { matchPricesSSE } from "../../lib/aiMatcher";
 import { parsePriceList, parseOrderList, buildExcelFromResult } from "../../lib/fileParser";
 import { logger } from "../../lib/logger";
 import type { MatchResult } from "../../lib/aiMatcher";
-import { hashFiles, getCached, setCached } from "../../lib/resultCache";
+import { hashFiles, getCached, setCached, searchPriceItems } from "../../lib/resultCache";
 
 const router: IRouter = Router();
 
@@ -13,26 +13,23 @@ const upload = multer({
   limits: { fileSize: 30 * 1024 * 1024 },
 });
 
-// In-memory store for download results
 const downloadStore = new Map<string, Buffer>();
 
 function generateId(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-// POST /match — upload files, stream SSE progress, final result
+// POST /match
 router.post(
   "/match",
   upload.fields([{ name: "priceFile", maxCount: 1 }, { name: "orderFile", maxCount: 1 }]),
   async (req, res): Promise<void> => {
     const files = req.files as Record<string, Express.Multer.File[]> | undefined;
-
     if (!files?.priceFile?.[0] || !files?.orderFile?.[0]) {
       res.status(400).json({ error: "Необходимо загрузить оба файла: priceFile и orderFile" });
       return;
     }
 
-    // Set up SSE
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
@@ -45,21 +42,18 @@ router.post(
 
     const priceBuffer = files.priceFile[0].buffer;
     const orderBuffer = files.orderFile[0].buffer;
+    const sessionId = hashFiles(priceBuffer, orderBuffer);
 
-    // Check cache first
     send("status", { message: "Проверяем кеш..." });
-    const cacheKey = hashFiles(priceBuffer, orderBuffer);
-    const cached = getCached(cacheKey);
-
+    const cached = getCached(sessionId);
     if (cached) {
-      req.log.info({ cacheKey: cacheKey.slice(0, 8) }, "Cache hit — returning cached result");
+      req.log.info({ sessionId: sessionId.slice(0, 8) }, "Cache hit");
       send("cached", { message: "Результат найден в кеше" });
-      send("result", cached);
+      send("result", { ...cached, sessionId });
       res.end();
       return;
     }
 
-    // Parse files
     send("status", { message: "Читаем файлы..." });
 
     let priceData: ReturnType<typeof parsePriceList>;
@@ -80,18 +74,13 @@ router.post(
       res.end();
       return;
     }
-
     if (orderItems.length === 0) {
       send("error", { error: "Список товаров пуст или не удалось распознать данные." });
       res.end();
       return;
     }
 
-    req.log.info(
-      { priceItemCount: priceData.items.length, orderItemCount: orderItems.length },
-      "Files parsed"
-    );
-
+    req.log.info({ priceItemCount: priceData.items.length, orderItemCount: orderItems.length }, "Files parsed");
     send("status", {
       message: `Найдено ${orderItems.length} позиций. Начинаем подбор цен...`,
       priceCount: priceData.items.length,
@@ -114,11 +103,9 @@ router.post(
         }
       );
 
-      // Store in cache
-      setCached(cacheKey, result);
-      req.log.info({ cacheKey: cacheKey.slice(0, 8) }, "Result cached");
-
-      send("result", result);
+      setCached(sessionId, result, priceData.items);
+      req.log.info({ sessionId: sessionId.slice(0, 8) }, "Result cached");
+      send("result", { ...result, sessionId });
       res.end();
     } catch (err) {
       req.log.error({ err }, "AI matching failed");
@@ -128,10 +115,23 @@ router.post(
   }
 );
 
-// POST /match/download — generate Excel, return downloadId
+// GET /match/price-search?sessionId=xxx&q=yyy
+router.get("/match/price-search", (req, res): void => {
+  const sessionId = String(req.query.sessionId ?? "");
+  const q = String(req.query.q ?? "");
+
+  if (!sessionId || !q) {
+    res.json({ items: [] });
+    return;
+  }
+
+  const items = searchPriceItems(sessionId, q, 8);
+  res.json({ items });
+});
+
+// POST /match/download
 router.post("/match/download", async (req, res): Promise<void> => {
   const body = req.body as MatchResult & { items?: unknown[] };
-
   if (!body?.items || !Array.isArray(body.items)) {
     res.status(400).json({ error: "Некорректные данные для формирования файла" });
     return;
@@ -141,10 +141,7 @@ router.post("/match/download", async (req, res): Promise<void> => {
     const buffer = buildExcelFromResult(body as Parameters<typeof buildExcelFromResult>[0]);
     const downloadId = generateId();
     downloadStore.set(downloadId, buffer);
-
-    // Auto-cleanup after 10 minutes
     setTimeout(() => downloadStore.delete(downloadId), 10 * 60 * 1000);
-
     res.json({ downloadId });
   } catch (err) {
     req.log.error({ err }, "Failed to build Excel");
@@ -152,16 +149,14 @@ router.post("/match/download", async (req, res): Promise<void> => {
   }
 });
 
-// GET /match/download/:id — stream the Excel file
-router.get("/match/download/:id", async (req, res): Promise<void> => {
+// GET /match/download/:id
+router.get("/match/download/:id", (req, res): void => {
   const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const buffer = downloadStore.get(raw);
-
   if (!buffer) {
     res.status(404).json({ error: "Файл не найден или истёк срок его хранения" });
     return;
   }
-
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   res.setHeader("Content-Disposition", "attachment; filename*=UTF-8''%D1%80%D0%B5%D0%B7%D1%83%D0%BB%D1%8C%D1%82%D0%B0%D1%82.xlsx");
   res.send(buffer);
