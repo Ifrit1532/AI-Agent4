@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { Dropzone } from "@/components/ui/dropzone";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -6,12 +6,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
-import { Loader2, Download, AlertCircle, FileSpreadsheet, Pencil, Check, X } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Loader2, Download, AlertCircle, FileSpreadsheet, Pencil, Check, X, ChevronDown } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useDownloadMatchResult } from "@workspace/api-client-react";
 import type { MatchResult } from "@workspace/api-client-react";
 
-// Extended types not yet in generated client
 interface RichMatchedItem {
   name: string;
   article?: string | null;
@@ -53,6 +53,16 @@ interface ProgressState {
   message: string;
 }
 
+interface PriceFilePreview {
+  columns: string[];
+  samples: Record<string, string[]>;
+  detected: {
+    nameColumn: string | null;
+    priceColumn: string | null;
+    articleColumn: string | null;
+  };
+}
+
 async function* readSSEEvents(response: Response): AsyncGenerator<{ event: string; data: unknown }> {
   const reader = response.body!.getReader();
   const decoder = new TextDecoder();
@@ -85,6 +95,8 @@ function useDebounce<T extends (...args: Parameters<T>) => void>(fn: T, delay: n
   }, [fn, delay]);
 }
 
+const NONE_VALUE = "__none__";
+
 export default function Home() {
   const { toast } = useToast();
   const [priceFile, setPriceFile] = useState<File | null>(null);
@@ -96,15 +108,59 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [fromCache, setFromCache] = useState(false);
 
+  // Column selection state
+  const [pricePreview, setPricePreview] = useState<PriceFilePreview | null>(null);
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
+  const [selectedNameCol, setSelectedNameCol] = useState<string>("");
+  const [selectedPriceCol, setSelectedPriceCol] = useState<string>("");
+  const [selectedArticleCol, setSelectedArticleCol] = useState<string>(NONE_VALUE);
+  const [showColumnConfig, setShowColumnConfig] = useState(false);
+
   // Per-row overrides: index → override
   const [overrides, setOverrides] = useState<Map<number, Override>>(new Map());
-  // Per-row article search state
   const [articleInputs, setArticleInputs] = useState<Map<number, string>>(new Map());
   const [searchResults, setSearchResults] = useState<Map<number, PriceCandidate[]>>(new Map());
   const [searchLoading, setSearchLoading] = useState<Map<number, boolean>>(new Map());
   const [editingPrice, setEditingPrice] = useState<Map<number, string>>(new Map());
 
   const downloadMutation = useDownloadMatchResult();
+
+  // Load column preview when price file changes
+  const loadPricePreview = useCallback(async (file: File) => {
+    setIsPreviewLoading(true);
+    setPricePreview(null);
+    try {
+      const fd = new FormData();
+      fd.append("priceFile", file);
+      const res = await fetch("/api/match/preview-price", { method: "POST", body: fd });
+      if (!res.ok) throw new Error("preview failed");
+      const preview = await res.json() as PriceFilePreview;
+      setPricePreview(preview);
+      setSelectedNameCol(preview.detected.nameColumn ?? preview.columns[0] ?? "");
+      setSelectedPriceCol(preview.detected.priceColumn ?? "");
+      setSelectedArticleCol(preview.detected.articleColumn ?? NONE_VALUE);
+    } catch {
+      setPricePreview(null);
+    } finally {
+      setIsPreviewLoading(false);
+    }
+  }, []);
+
+  const handlePriceFileSelect = (file: File | null) => {
+    setPriceFile(file);
+    setPricePreview(null);
+    setShowColumnConfig(false);
+    if (file) {
+      void loadPricePreview(file);
+    }
+  };
+
+  // Auto-show column config when preview loaded and has columns
+  useEffect(() => {
+    if (pricePreview && pricePreview.columns.length > 0) {
+      setShowColumnConfig(true);
+    }
+  }, [pricePreview]);
 
   // ── SSE upload ─────────────────────────────────────────────────────────────
   const handleProcess = async () => {
@@ -128,6 +184,9 @@ export default function Home() {
       const formData = new FormData();
       formData.append("priceFile", priceFile);
       formData.append("orderFile", orderFile);
+      if (selectedNameCol) formData.append("nameColumn", selectedNameCol);
+      if (selectedPriceCol) formData.append("priceColumn", selectedPriceCol);
+      if (selectedArticleCol && selectedArticleCol !== NONE_VALUE) formData.append("articleColumn", selectedArticleCol);
 
       const res = await fetch("/api/match", { method: "POST", body: formData });
       if (!res.ok || !res.body) {
@@ -253,6 +312,8 @@ export default function Home() {
     setProgress(null); setFromCache(false); setSessionId(null);
     setOverrides(new Map()); setArticleInputs(new Map());
     setSearchResults(new Map()); setSearchLoading(new Map()); setEditingPrice(new Map());
+    setPricePreview(null); setSelectedNameCol(""); setSelectedPriceCol("");
+    setSelectedArticleCol(NONE_VALUE); setShowColumnConfig(false);
   };
 
   const progressPercent = progress && progress.total > 0 ? Math.round((progress.processed / progress.total) * 100) : null;
@@ -269,6 +330,113 @@ export default function Home() {
     if (method === "article") return <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-400 dark:border-emerald-800 font-medium text-[11px]">По артикулу</Badge>;
     if (method === "embedded_code") return <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400 dark:border-blue-800 font-medium text-[11px]">По коду</Badge>;
     return <Badge variant="outline" className="bg-slate-50 text-slate-600 border-slate-200 dark:bg-slate-950/30 dark:text-slate-400 dark:border-slate-700 font-medium text-[11px]">По названию</Badge>;
+  };
+
+  // ── Column selector UI ──────────────────────────────────────────────────────
+  const ColumnSelector = () => {
+    if (!priceFile) return null;
+    if (isPreviewLoading) {
+      return (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground mt-3 px-1">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          <span>Определяем колонки прайса...</span>
+        </div>
+      );
+    }
+    if (!pricePreview || pricePreview.columns.length === 0) return null;
+
+    const cols = pricePreview.columns;
+    const samples = pricePreview.samples;
+
+    const samplePreview = (col: string) => {
+      const vals = samples[col] ?? [];
+      if (!vals.length) return null;
+      return <span className="text-muted-foreground/70 truncate max-w-[160px] block">{vals.slice(0, 2).join(", ")}</span>;
+    };
+
+    return (
+      <div className="mt-4 rounded-lg border border-border bg-muted/30">
+        <button
+          type="button"
+          onClick={() => setShowColumnConfig((v) => !v)}
+          className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium hover:bg-muted/50 transition-colors rounded-lg"
+        >
+          <span className="flex items-center gap-2">
+            <span>Колонки прайса</span>
+            {selectedNameCol && selectedPriceCol && (
+              <Badge variant="outline" className="text-[11px] font-normal bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-400 dark:border-emerald-800">
+                {selectedNameCol} / {selectedPriceCol}
+              </Badge>
+            )}
+          </span>
+          <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${showColumnConfig ? "rotate-180" : ""}`} />
+        </button>
+
+        {showColumnConfig && (
+          <div className="px-4 pb-4 space-y-4 border-t border-border pt-4">
+            <p className="text-xs text-muted-foreground">
+              Система автоматически определила колонки. Проверьте и при необходимости скорректируйте.
+            </p>
+            <div className="grid gap-4 sm:grid-cols-3">
+              {/* Name column */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-foreground">Колонка с названием</label>
+                <Select value={selectedNameCol} onValueChange={setSelectedNameCol}>
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue placeholder="Выберите колонку" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {cols.map((col) => (
+                      <SelectItem key={col} value={col} className="text-xs">
+                        <span className="font-medium">{col}</span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {samplePreview(selectedNameCol)}
+              </div>
+
+              {/* Price column */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-foreground">Колонка с ценой</label>
+                <Select value={selectedPriceCol} onValueChange={setSelectedPriceCol}>
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue placeholder="Выберите колонку" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {cols.map((col) => (
+                      <SelectItem key={col} value={col} className="text-xs">
+                        <span className="font-medium">{col}</span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {samplePreview(selectedPriceCol)}
+              </div>
+
+              {/* Article column (optional) */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-foreground">Артикул <span className="text-muted-foreground font-normal">(необязательно)</span></label>
+                <Select value={selectedArticleCol} onValueChange={setSelectedArticleCol}>
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue placeholder="Не выбрано" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NONE_VALUE} className="text-xs text-muted-foreground">Не выбрано</SelectItem>
+                    {cols.map((col) => (
+                      <SelectItem key={col} value={col} className="text-xs">
+                        <span className="font-medium">{col}</span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {selectedArticleCol && selectedArticleCol !== NONE_VALUE && samplePreview(selectedArticleCol)}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
   };
 
   return (
@@ -309,7 +477,10 @@ export default function Home() {
               )}
 
               <div className="grid gap-4 md:grid-cols-2">
-                <Dropzone label="Прайс-лист" accept=".xlsx,.xls,.csv" file={priceFile} onFileSelect={setPriceFile} />
+                <div className="space-y-0">
+                  <Dropzone label="Прайс-лист" accept=".xlsx,.xls,.csv" file={priceFile} onFileSelect={handlePriceFileSelect} />
+                  <ColumnSelector />
+                </div>
                 <Dropzone label="Список товаров" accept=".xlsx,.xls,.csv" file={orderFile} onFileSelect={setOrderFile} />
               </div>
 
@@ -331,7 +502,7 @@ export default function Home() {
               )}
 
               <div className="flex justify-end pt-4 border-t border-border">
-                <Button size="lg" onClick={handleProcess} disabled={!priceFile || !orderFile || isProcessing} className="w-full sm:w-auto font-medium">
+                <Button size="lg" onClick={handleProcess} disabled={!priceFile || !orderFile || isProcessing || isPreviewLoading} className="w-full sm:w-auto font-medium">
                   {isProcessing ? <><Loader2 className="mr-2 h-5 w-5 animate-spin" />ИИ анализирует файлы...</> : "Начать сопоставление"}
                 </Button>
               </div>
@@ -344,9 +515,10 @@ export default function Home() {
                 </CardHeader>
                 <CardContent className="pt-4 space-y-2 text-sm text-muted-foreground">
                   <p>1. ИИ читает оба файла и понимает их структуру.</p>
-                  <p>2. Товары сопоставляются по смыслу, артикулу и кодам.</p>
-                  <p>3. Для незнайденных позиций можно указать артикул или цену вручную.</p>
-                  <p>4. Скачайте итоговую таблицу в Excel.</p>
+                  <p>2. Выберите нужные колонки прайса, если авто-определение не точное.</p>
+                  <p>3. Товары сопоставляются по смыслу, артикулу и кодам.</p>
+                  <p>4. Для незнайденных позиций можно указать артикул или цену вручную.</p>
+                  <p>5. Скачайте итоговую таблицу в Excel.</p>
                 </CardContent>
               </Card>
             </div>
@@ -410,10 +582,8 @@ export default function Home() {
 
                       return (
                         <TableRow key={idx} className={rowBg}>
-                          {/* Name */}
                           <TableCell className="font-medium text-sm py-2">{item.name}</TableCell>
 
-                          {/* Article / Code — editable for not-found rows */}
                           <TableCell className="py-2">
                             {isNotFound ? (
                               <div className="relative">
@@ -424,7 +594,6 @@ export default function Home() {
                                   className="h-7 text-xs font-mono px-2 w-full"
                                 />
                                 {isSearching && <Loader2 className="absolute right-2 top-1.5 h-3 w-3 animate-spin text-muted-foreground" />}
-                                {/* Dropdown */}
                                 {candidates.length > 0 && artInput.length > 0 && (
                                   <div className="absolute z-50 top-full mt-1 left-0 w-72 bg-popover border border-border rounded-md shadow-lg overflow-hidden">
                                     {candidates.map((c, ci) => (
@@ -449,23 +618,17 @@ export default function Home() {
                             )}
                           </TableCell>
 
-                          {/* Matched name */}
                           <TableCell className="text-muted-foreground text-sm py-2">
                             {effectiveItem.matchedName || "-"}
                           </TableCell>
 
-                          {/* Matched article */}
                           <TableCell className="text-muted-foreground text-xs font-mono py-2">
                             {effectiveItem.matchedArticle || "-"}
                           </TableCell>
 
-                          {/* Qty */}
                           <TableCell className="text-right py-2">{item.quantity}</TableCell>
-
-                          {/* Unit */}
                           <TableCell className="py-2">{item.unit || "-"}</TableCell>
 
-                          {/* Price — always editable */}
                           <TableCell className="text-right py-2">
                             {priceEditing !== undefined || isNotFound ? (
                               <div className="flex items-center gap-1 justify-end">
@@ -494,12 +657,10 @@ export default function Home() {
                             )}
                           </TableCell>
 
-                          {/* Total */}
                           <TableCell className="text-right font-semibold py-2">
                             {effectiveItem.totalPrice != null ? effectiveItem.totalPrice.toLocaleString("ru-RU") : "-"}
                           </TableCell>
 
-                          {/* Status + clear override */}
                           <TableCell className="text-center py-2">
                             <div className="flex items-center justify-center gap-1">
                               {methodBadge(item, ov)}
@@ -518,7 +679,6 @@ export default function Home() {
               </div>
             </Card>
 
-            {/* Grand total */}
             <div className="flex justify-end items-center py-4 px-6 bg-card border border-border rounded-lg shadow-sm">
               <div className="flex items-center gap-4">
                 <span className="text-muted-foreground font-medium text-sm">Итого:</span>

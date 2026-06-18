@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import multer from "multer";
 import { matchPricesSSE } from "../../lib/aiMatcher";
-import { parsePriceList, parseOrderList, buildExcelFromResult } from "../../lib/fileParser";
+import { parsePriceList, parseOrderList, buildExcelFromResult, previewPriceFile } from "../../lib/fileParser";
 import { logger } from "../../lib/logger";
 import type { MatchResult } from "../../lib/aiMatcher";
 import { hashFiles, getCached, setCached, searchPriceItems } from "../../lib/resultCache";
@@ -18,6 +18,26 @@ const downloadStore = new Map<string, Buffer>();
 function generateId(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
+
+// POST /match/preview-price — returns columns + samples + auto-detected suggestions
+router.post(
+  "/match/preview-price",
+  upload.fields([{ name: "priceFile", maxCount: 1 }]),
+  (req, res): void => {
+    const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+    if (!files?.priceFile?.[0]) {
+      res.status(400).json({ error: "Необходимо загрузить priceFile" });
+      return;
+    }
+    try {
+      const preview = previewPriceFile(files.priceFile[0].buffer);
+      res.json(preview);
+    } catch (err) {
+      req.log.error({ err }, "Failed to preview price file");
+      res.status(400).json({ error: "Не удалось прочитать файл." });
+    }
+  }
+);
 
 // POST /match
 router.post(
@@ -56,11 +76,19 @@ router.post(
 
     send("status", { message: "Читаем файлы..." });
 
+    // Optional column overrides passed from frontend after user selection
+    const body = req.body as Record<string, string>;
+    const colOverrides = {
+      nameColumn: body.nameColumn || undefined,
+      priceColumn: body.priceColumn || undefined,
+      articleColumn: body.articleColumn || undefined,
+    };
+
     let priceData: ReturnType<typeof parsePriceList>;
     let orderItems: ReturnType<typeof parseOrderList>;
 
     try {
-      priceData = parsePriceList(priceBuffer);
+      priceData = parsePriceList(priceBuffer, colOverrides);
       orderItems = parseOrderList(orderBuffer);
     } catch (err) {
       req.log.error({ err }, "Failed to parse files");

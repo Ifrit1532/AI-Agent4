@@ -122,7 +122,91 @@ function firstSheetToRows(buffer: Buffer): Record<string, unknown>[] {
   });
 }
 
-export function parsePriceList(buffer: Buffer): { items: PriceItem[]; currency: string } {
+export interface PriceFilePreview {
+  columns: string[];
+  samples: Record<string, string[]>;
+  detected: {
+    nameColumn: string | null;
+    priceColumn: string | null;
+    articleColumn: string | null;
+  };
+}
+
+export interface PriceColumnOverrides {
+  nameColumn?: string;
+  priceColumn?: string;
+  articleColumn?: string;
+}
+
+/** Extract all unique column headers from the first sheet */
+function getColumnsFromBuffer(buffer: Buffer): { columns: string[]; rows: Record<string, unknown>[] } {
+  const rows = allSheetsToRows(buffer);
+  const seen = new Set<string>();
+  const columns: string[] = [];
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      if (!seen.has(key)) { seen.add(key); columns.push(key); }
+    }
+    if (columns.length > 0) break; // keys are stable across rows for sheet_to_json
+  }
+  return { columns, rows };
+}
+
+export function previewPriceFile(buffer: Buffer): PriceFilePreview {
+  const { columns, rows } = getColumnsFromBuffer(buffer);
+
+  // Collect up to 3 non-empty sample values per column
+  const samples: Record<string, string[]> = {};
+  for (const col of columns) samples[col] = [];
+
+  for (const row of rows) {
+    let full = true;
+    for (const col of columns) {
+      if ((samples[col]?.length ?? 0) < 3) {
+        full = false;
+        const val = String(row[col] ?? "").trim();
+        if (val && val.toLowerCase() !== normalizeHeader(col)) {
+          samples[col] = [...(samples[col] ?? []), val];
+        }
+      }
+    }
+    if (full) break;
+  }
+
+  // Auto-detect which columns match name/price/article
+  let nameColumn: string | null = null;
+  let priceColumn: string | null = null;
+  let articleColumn: string | null = null;
+
+  for (const col of columns) {
+    const h = normalizeHeader(col);
+    if (!articleColumn && isArticleHeader(h)) articleColumn = col;
+    if (!nameColumn && isNameHeader(h)) nameColumn = col;
+    if (!priceColumn && isPriceHeader(h)) priceColumn = col;
+  }
+
+  // Fallback: if no price column found by header, pick first column with numeric sample values
+  if (!priceColumn) {
+    for (const col of columns) {
+      if (col === nameColumn || col === articleColumn) continue;
+      const sampleVals = samples[col] ?? [];
+      if (sampleVals.length > 0 && sampleVals.every((v) => isNumeric(v))) {
+        priceColumn = col;
+        break;
+      }
+    }
+  }
+
+  // Fallback: first column as name if nothing detected
+  if (!nameColumn && columns.length > 0) nameColumn = columns[0] ?? null;
+
+  return { columns, samples, detected: { nameColumn, priceColumn, articleColumn } };
+}
+
+export function parsePriceList(
+  buffer: Buffer,
+  overrides?: PriceColumnOverrides,
+): { items: PriceItem[]; currency: string } {
   // Read ALL sheets so grouped/collapsed sections are included
   const rows = allSheetsToRows(buffer);
   const currency = detectCurrency(rows);
@@ -130,25 +214,38 @@ export function parsePriceList(buffer: Buffer): { items: PriceItem[]; currency: 
   const items: PriceItem[] = [];
 
   // Detect column layout from the first row that has meaningful headers
-  let nameKey = "";
-  let priceKey = "";
+  let nameKey = overrides?.nameColumn ?? "";
+  let priceKey = overrides?.priceColumn ?? "";
   let unitKey = "";
-  let articleKey = "";
+  let articleKey = overrides?.articleColumn ?? "";
 
-  // First pass: detect columns from headers
-  for (const row of rows) {
-    const keys = Object.keys(row);
-    let foundHeaders = false;
+  // First pass: detect columns from headers (skip if overridden)
+  if (!nameKey || !priceKey) {
+    for (const row of rows) {
+      const keys = Object.keys(row);
+      let foundHeaders = false;
 
-    for (const key of keys) {
-      const h = normalizeHeader(key);
-      if (!articleKey && isArticleHeader(h)) { articleKey = key; foundHeaders = true; }
-      if (!nameKey && isNameHeader(h)) { nameKey = key; foundHeaders = true; }
-      if (!priceKey && isPriceHeader(h)) { priceKey = key; foundHeaders = true; }
-      if (!unitKey && isUnitHeader(h)) { unitKey = key; foundHeaders = true; }
+      for (const key of keys) {
+        const h = normalizeHeader(key);
+        if (!articleKey && isArticleHeader(h)) { articleKey = key; foundHeaders = true; }
+        if (!nameKey && isNameHeader(h)) { nameKey = key; foundHeaders = true; }
+        if (!priceKey && isPriceHeader(h)) { priceKey = key; foundHeaders = true; }
+        if (!unitKey && isUnitHeader(h)) { unitKey = key; foundHeaders = true; }
+      }
+
+      if (foundHeaders && (nameKey || priceKey)) break;
     }
-
-    if (foundHeaders && (nameKey || priceKey)) break;
+  } else {
+    // Still detect unit & article from headers if not overridden
+    for (const row of rows) {
+      const keys = Object.keys(row);
+      for (const key of keys) {
+        const h = normalizeHeader(key);
+        if (!unitKey && isUnitHeader(h)) unitKey = key;
+        if (!articleKey && isArticleHeader(h)) articleKey = key;
+      }
+      if (unitKey) break;
+    }
   }
 
   // Second pass: extract item rows
