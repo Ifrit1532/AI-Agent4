@@ -118,6 +118,10 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [fromCache, setFromCache] = useState(false);
 
+  // Cache prompt state
+  const [pendingCachedResult, setPendingCachedResult] = useState<RichMatchResult | null>(null);
+  const skipCacheRef = useRef(false);
+
   // Column selection state — price file
   const [pricePreview, setPricePreview] = useState<PriceFilePreview | null>(null);
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
@@ -218,6 +222,7 @@ export default function Home() {
     setResult(null);
     setProgress(null);
     setFromCache(false);
+    setPendingCachedResult(null);
     setOverrides(new Map());
     setArticleInputs(new Map());
     setSearchResults(new Map());
@@ -235,6 +240,8 @@ export default function Home() {
       if (selectedOrderNameCol) formData.append("orderNameColumn", selectedOrderNameCol);
       if (selectedOrderQtyCol) formData.append("orderQtyColumn", selectedOrderQtyCol);
       if (selectedOrderArticleCol && selectedOrderArticleCol !== NONE_VALUE) formData.append("orderArticleColumn", selectedOrderArticleCol);
+      if (skipCacheRef.current) formData.append("skipCache", "true");
+      skipCacheRef.current = false;
 
       const res = await fetch("/api/match", { method: "POST", body: formData });
       if (!res.ok || !res.body) {
@@ -248,10 +255,9 @@ export default function Home() {
           setProgress({ processed: 0, total: (d.orderCount as number) || 0, batchIndex: 0, totalBatches: 0, message: (d.message as string) || "Обработка..." });
         } else if (event === "progress") {
           setProgress({ processed: (d.processed as number) || 0, total: (d.total as number) || 0, batchIndex: (d.batchIndex as number) || 0, totalBatches: (d.totalBatches as number) || 0, message: `Батч ${d.batchIndex} из ${d.totalBatches}...` });
-        } else if (event === "cached") {
+        } else if (event === "cache_hit") {
           setProgress(null);
-          setFromCache(true);
-          toast({ title: "Из кеша", description: "Результат загружен мгновенно из кеша" });
+          setPendingCachedResult(data as RichMatchResult);
         } else if (event === "result") {
           const r = data as RichMatchResult;
           setResult(r);
@@ -263,12 +269,26 @@ export default function Home() {
         }
       }
     } catch (err) {
-      console.error("Upload error:", err);
       setError(err instanceof Error ? err.message : "Произошла ошибка");
       setProgress(null);
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  const applyCachedResult = () => {
+    if (!pendingCachedResult) return;
+    setResult(pendingCachedResult);
+    setSessionId(pendingCachedResult.sessionId ?? null);
+    setFromCache(true);
+    setPendingCachedResult(null);
+    toast({ title: "Загружено из кэша", description: "Результат восстановлен из кэша" });
+  };
+
+  const reprocessFiles = () => {
+    setPendingCachedResult(null);
+    skipCacheRef.current = true;
+    void handleProcess();
   };
 
   // ── Article search ──────────────────────────────────────────────────────────
@@ -364,6 +384,7 @@ export default function Home() {
     setSelectedArticleCol(NONE_VALUE); setShowColumnConfig(false);
     setOrderPreview(null); setSelectedOrderNameCol(""); setSelectedOrderQtyCol("");
     setSelectedOrderArticleCol(NONE_VALUE); setShowOrderColumnConfig(false);
+    setPendingCachedResult(null); skipCacheRef.current = false;
   };
 
   const progressPercent = progress && progress.total > 0 ? Math.round((progress.processed / progress.total) * 100) : null;
@@ -625,6 +646,24 @@ export default function Home() {
                 <h2 className="text-2xl font-semibold tracking-tight">Анализ файлов</h2>
                 <p className="text-muted-foreground">Загрузите прайс-лист поставщика и ваш список товаров для автоматического сопоставления.</p>
               </div>
+
+              {pendingCachedResult && (
+                <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-3">
+                  <AlertCircle className="w-5 h-5 shrink-0 mt-0.5 text-amber-600" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-amber-800">Найден результат в кэше</p>
+                    <p className="text-xs text-amber-700 mt-0.5">Эти файлы уже обрабатывались ранее. Использовать сохранённый результат или запустить новый анализ?</p>
+                    <div className="flex gap-2 mt-3">
+                      <Button size="sm" onClick={applyCachedResult} className="h-7 text-xs bg-amber-600 hover:bg-amber-700 text-white border-0">
+                        Использовать кэш
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={reprocessFiles} className="h-7 text-xs border-amber-300 text-amber-800 hover:bg-amber-100">
+                        Обработать заново
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {error && (
                 <div className="p-4 bg-destructive/10 border border-destructive/20 rounded-lg flex items-start gap-3 text-destructive">

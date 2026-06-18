@@ -84,20 +84,21 @@ router.post(
     const orderBuffer = files.orderFile[0].buffer;
     const sessionId = hashFiles(priceBuffer, orderBuffer);
 
-    send("status", { message: "Проверяем кеш..." });
-    const cached = getCached(sessionId);
-    if (cached) {
-      req.log.info({ sessionId: sessionId.slice(0, 8) }, "Cache hit");
-      send("cached", { message: "Результат найден в кеше" });
-      send("result", { ...cached, sessionId });
-      res.end();
-      return;
+    // Optional column overrides and flags passed from frontend
+    const body = req.body as Record<string, string>;
+    const skipCache = body.skipCache === "true";
+
+    if (!skipCache) {
+      const cached = getCached(sessionId);
+      if (cached) {
+        req.log.info({ sessionId: sessionId.slice(0, 8) }, "Cache hit — asking user");
+        send("cache_hit", { ...cached, sessionId });
+        res.end();
+        return;
+      }
     }
 
     send("status", { message: "Читаем файлы..." });
-
-    // Optional column overrides passed from frontend after user selection
-    const body = req.body as Record<string, string>;
     const priceColOverrides = {
       nameColumn: body.nameColumn || undefined,
       priceColumn: body.priceColumn || undefined,
