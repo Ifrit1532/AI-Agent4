@@ -111,3 +111,8 @@
     @apply font-sans antialiased bg-background text-foreground;
   }
 }
+
+@keyframes progress-indeterminate {
+  0%   { transform: translateX(-150%); }
+  100% { transform: translateX(400%); }
+}

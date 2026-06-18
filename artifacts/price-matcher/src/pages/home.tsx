@@ -875,19 +875,42 @@ export default function Home() {
               </div>
 
               {isProcessing && (
-                <div className="space-y-3 p-4 bg-muted/40 border border-border rounded-lg">
-                  <div className="flex items-center gap-3">
-                    <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />
-                    <p className="text-sm font-medium">{progress?.message ?? "Обработка файлов..."}</p>
+                <div className="p-5 bg-muted/40 border border-border rounded-xl space-y-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />
+                      <p className="text-sm font-medium truncate">{progress?.message ?? "Обработка файлов..."}</p>
+                    </div>
+                    <span className="text-3xl font-bold tabular-nums text-primary shrink-0">
+                      {progressPercent !== null ? `${progressPercent}%` : "—"}
+                    </span>
                   </div>
-                  {progressPercent !== null && (
-                    <>
-                      <Progress value={progressPercent} className="h-2" />
-                      <p className="text-xs text-muted-foreground text-right">
-                        {progress!.processed} из {progress!.total} позиций — {progressPercent}%
-                      </p>
-                    </>
-                  )}
+
+                  <div className="relative h-4 w-full overflow-hidden rounded-full bg-muted">
+                    {progressPercent === null || (progress?.batchIndex === 0 && progressPercent === 0) ? (
+                      <div className="absolute inset-0 rounded-full bg-primary/20">
+                        <div className="h-full w-1/3 rounded-full bg-primary/60 animate-[progress-indeterminate_1.4s_ease-in-out_infinite]" />
+                      </div>
+                    ) : (
+                      <div
+                        className="h-full rounded-full bg-primary transition-all duration-500 ease-out"
+                        style={{ width: `${progressPercent}%` }}
+                      />
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>
+                      {progress && progress.batchIndex > 0
+                        ? `Батч ${progress.batchIndex} из ${progress.totalBatches}`
+                        : "Подготовка..."}
+                    </span>
+                    <span>
+                      {progress && progress.total > 0
+                        ? `${progress.processed} из ${progress.total} позиций`
+                        : ""}
+                    </span>
+                  </div>
                 </div>
               )}
 
