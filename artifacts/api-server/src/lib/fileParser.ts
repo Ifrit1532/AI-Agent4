@@ -7,7 +7,7 @@ function normalizeHeader(h: unknown): string {
 
 function isNumeric(val: unknown): boolean {
   if (val === null || val === undefined || val === "") return false;
-  return !isNaN(Number(val));
+  return !isNaN(Number(String(val).replace(/\s/g, "").replace(",", ".")));
 }
 
 function toNumber(val: unknown): number {
@@ -15,75 +15,179 @@ function toNumber(val: unknown): number {
 }
 
 function detectCurrency(rows: Record<string, unknown>[]): string {
-  const text = JSON.stringify(rows);
+  const text = JSON.stringify(rows).slice(0, 50000);
   if (/руб|rub|₽/i.test(text)) return "RUB";
-  if (/uah|грн|UAH/i.test(text)) return "UAH";
+  if (/uah|грн/i.test(text)) return "UAH";
   if (/usd|\$/i.test(text)) return "USD";
   if (/eur|€/i.test(text)) return "EUR";
   return "RUB";
 }
 
-function sheetToRows(buffer: Buffer): Record<string, unknown>[] {
-  const workbook = XLSX.read(buffer, { type: "buffer" });
+// Detect article/SKU column from header name
+function isArticleHeader(h: string): boolean {
+  const n = h.toLowerCase();
+  return (
+    n.includes("артик") ||
+    n.includes("арт.") ||
+    n === "арт" ||
+    n.includes("article") ||
+    n.includes("sku") ||
+    n.includes("код") ||
+    n.includes("code") ||
+    n.includes("партном") ||
+    n.includes("part")
+  );
+}
+
+function isPriceHeader(h: string): boolean {
+  return (
+    h.includes("цен") ||
+    h.includes("price") ||
+    h.includes("стоим") ||
+    h.includes("cost")
+  );
+}
+
+function isNameHeader(h: string): boolean {
+  return (
+    h.includes("наим") ||
+    h.includes("товар") ||
+    h.includes("продукт") ||
+    h.includes("name") ||
+    h.includes("descrip") ||
+    h.includes("позиц") ||
+    h.includes("номенкл")
+  );
+}
+
+function isUnitHeader(h: string): boolean {
+  return h.includes("ед") || h.includes("unit") || h.includes("мера") || h.includes("уп");
+}
+
+function isQtyHeader(h: string): boolean {
+  return (
+    h.includes("кол") ||
+    h.includes("qty") ||
+    h.includes("quant") ||
+    h.includes("количест") ||
+    h.includes("count")
+  );
+}
+
+/**
+ * Read ALL sheets from a workbook, including hidden/collapsed rows.
+ * Returns combined rows tagged with the sheet name.
+ */
+function allSheetsToRows(buffer: Buffer): Record<string, unknown>[] {
+  const workbook = XLSX.read(buffer, {
+    type: "buffer",
+    // cellStyles: needed to detect hidden rows via !rows metadata
+    cellStyles: true,
+  });
+
+  const allRows: Record<string, unknown>[] = [];
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) continue;
+
+    // sheet_to_json includes hidden rows by default.
+    // We explicitly set raw: false so dates/numbers are formatted strings,
+    // and defval: null so empty cells are null, not undefined.
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
+      defval: null,
+      raw: false,
+      // blankrows: false skips rows where EVERY cell is blank/null
+      blankrows: false,
+    });
+
+    allRows.push(...rows);
+  }
+
+  return allRows;
+}
+
+/**
+ * Read only the first sheet (used for order files which are typically single-sheet).
+ */
+function firstSheetToRows(buffer: Buffer): Record<string, unknown>[] {
+  const workbook = XLSX.read(buffer, { type: "buffer", cellStyles: true });
   const sheetName = workbook.SheetNames[0];
+  if (!sheetName) return [];
   const sheet = workbook.Sheets[sheetName];
-  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
+  return XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
     defval: null,
     raw: false,
+    blankrows: false,
   });
-  return rows;
 }
 
 export function parsePriceList(buffer: Buffer): { items: PriceItem[]; currency: string } {
-  const rows = sheetToRows(buffer);
+  // Read ALL sheets so grouped/collapsed sections are included
+  const rows = allSheetsToRows(buffer);
   const currency = detectCurrency(rows);
 
-  // Try to detect columns
   const items: PriceItem[] = [];
 
+  // Detect column layout from the first row that has meaningful headers
+  let nameKey = "";
+  let priceKey = "";
+  let unitKey = "";
+  let articleKey = "";
+
+  // First pass: detect columns from headers
+  for (const row of rows) {
+    const keys = Object.keys(row);
+    let foundHeaders = false;
+
+    for (const key of keys) {
+      const h = normalizeHeader(key);
+      if (!articleKey && isArticleHeader(h)) { articleKey = key; foundHeaders = true; }
+      if (!nameKey && isNameHeader(h)) { nameKey = key; foundHeaders = true; }
+      if (!priceKey && isPriceHeader(h)) { priceKey = key; foundHeaders = true; }
+      if (!unitKey && isUnitHeader(h)) { unitKey = key; foundHeaders = true; }
+    }
+
+    if (foundHeaders && (nameKey || priceKey)) break;
+  }
+
+  // Second pass: extract item rows
   for (const row of rows) {
     const keys = Object.keys(row);
     if (keys.length < 2) continue;
 
-    // Find name column (first text-heavy column)
-    let nameKey = "";
-    let priceKey = "";
-    let unitKey = "";
+    // Per-row fallback detection if global detection found nothing
+    let localNameKey = nameKey;
+    let localPriceKey = priceKey;
+    let localUnitKey = unitKey;
+    let localArticleKey = articleKey;
 
-    for (const key of keys) {
-      const h = normalizeHeader(key);
-      if (!nameKey && (h.includes("наим") || h.includes("товар") || h.includes("продукт") || h.includes("name") || h.includes("descrip") || h.includes("позиц"))) {
-        nameKey = key;
-      }
-      if (!priceKey && (h.includes("цен") || h.includes("price") || h.includes("стоим") || h.includes("cost"))) {
-        priceKey = key;
-      }
-      if (!unitKey && (h.includes("ед") || h.includes("unit") || h.includes("мера") || h.includes("уп"))) {
-        unitKey = key;
-      }
-    }
-
-    // Fallback: first column is name, find first numeric column as price
-    if (!nameKey) nameKey = keys[0];
-    if (!priceKey) {
+    if (!localNameKey) localNameKey = keys[0];
+    if (!localPriceKey) {
       for (const key of keys) {
-        if (key !== nameKey && isNumeric(row[key])) {
-          priceKey = key;
+        if (key !== localNameKey && isNumeric(row[key])) {
+          localPriceKey = key;
           break;
         }
       }
     }
 
-    const nameVal = String(row[nameKey] ?? "").trim();
-    const priceVal = row[priceKey];
+    const nameVal = String(row[localNameKey] ?? "").trim();
+    const priceVal = row[localPriceKey];
 
     if (!nameVal || !priceVal || !isNumeric(priceVal)) continue;
-    if (nameVal.toLowerCase() === normalizeHeader(nameKey)) continue; // skip header rows
+    // Skip rows that look like headers themselves
+    if (nameVal.toLowerCase() === normalizeHeader(localNameKey)) continue;
+
+    const articleVal = localArticleKey
+      ? String(row[localArticleKey] ?? "").trim() || null
+      : null;
 
     items.push({
       name: nameVal,
       price: toNumber(priceVal),
-      unit: unitKey ? String(row[unitKey] ?? "").trim() || null : null,
+      unit: localUnitKey ? String(row[localUnitKey] ?? "").trim() || null : null,
+      article: articleVal,
     });
   }
 
@@ -91,34 +195,31 @@ export function parsePriceList(buffer: Buffer): { items: PriceItem[]; currency: 
 }
 
 export function parseOrderList(buffer: Buffer): OrderItem[] {
-  const rows = sheetToRows(buffer);
+  const rows = firstSheetToRows(buffer);
   const items: OrderItem[] = [];
+
+  let nameKey = "";
+  let qtyKey = "";
+  let unitKey = "";
+  let articleKey = "";
 
   for (const row of rows) {
     const keys = Object.keys(row);
     if (keys.length < 2) continue;
 
-    let nameKey = "";
-    let qtyKey = "";
-    let unitKey = "";
-
+    // Detect columns per row (headers may shift per row in some formats)
     for (const key of keys) {
       const h = normalizeHeader(key);
-      if (!nameKey && (h.includes("наим") || h.includes("товар") || h.includes("продукт") || h.includes("name") || h.includes("descrip") || h.includes("позиц"))) {
-        nameKey = key;
-      }
-      if (!qtyKey && (h.includes("кол") || h.includes("qty") || h.includes("quant") || h.includes("количест") || h.includes("count"))) {
-        qtyKey = key;
-      }
-      if (!unitKey && (h.includes("ед") || h.includes("unit") || h.includes("мера") || h.includes("уп"))) {
-        unitKey = key;
-      }
+      if (!articleKey && isArticleHeader(h)) articleKey = key;
+      if (!nameKey && isNameHeader(h)) nameKey = key;
+      if (!qtyKey && isQtyHeader(h)) qtyKey = key;
+      if (!unitKey && isUnitHeader(h)) unitKey = key;
     }
 
     if (!nameKey) nameKey = keys[0];
     if (!qtyKey) {
       for (const key of keys) {
-        if (key !== nameKey && isNumeric(row[key])) {
+        if (key !== nameKey && key !== articleKey && isNumeric(row[key])) {
           qtyKey = key;
           break;
         }
@@ -131,10 +232,15 @@ export function parseOrderList(buffer: Buffer): OrderItem[] {
     if (!nameVal || !qtyVal || !isNumeric(qtyVal)) continue;
     if (nameVal.toLowerCase() === normalizeHeader(nameKey)) continue;
 
+    const articleVal = articleKey
+      ? String(row[articleKey] ?? "").trim() || null
+      : null;
+
     items.push({
       name: nameVal,
       quantity: toNumber(qtyVal),
       unit: unitKey ? String(row[unitKey] ?? "").trim() || null : null,
+      article: articleVal,
     });
   }
 
@@ -150,6 +256,7 @@ export function buildExcelFromResult(result: {
     totalPrice: number | null;
     found: boolean;
     matchedName: string | null;
+    matchedArticle?: string | null;
   }>;
   grandTotal: number;
   currency: string;
@@ -157,11 +264,25 @@ export function buildExcelFromResult(result: {
 }): Buffer {
   const wb = XLSX.utils.book_new();
 
-  const header = ["Наименование (запрос)", "Найдено в прайсе", "Кол-во", "Ед.", `Цена за ед. (${result.currency})`, `Сумма (${result.currency})`, "Статус"];
+  const hasArticles = result.items.some((i) => i.matchedArticle);
+
+  const header = [
+    "Наименование (запрос)",
+    "Артикул (запрос)",
+    "Найдено в прайсе",
+    ...(hasArticles ? ["Артикул (прайс)"] : []),
+    "Кол-во",
+    "Ед.",
+    `Цена за ед. (${result.currency})`,
+    `Сумма (${result.currency})`,
+    "Статус",
+  ];
 
   const dataRows = result.items.map((item) => [
     item.name,
+    (item as unknown as { article?: string | null }).article ?? "",
     item.matchedName ?? "—",
+    ...(hasArticles ? [item.matchedArticle ?? ""] : []),
     item.quantity,
     item.unit ?? "",
     item.unitPrice ?? "",
@@ -169,19 +290,25 @@ export function buildExcelFromResult(result: {
     item.found ? "Найдено" : "Не найдено",
   ]);
 
-  // Add grand total row
-  dataRows.push(["", "", "", "", "ИТОГО:", result.grandTotal, ""]);
+  const totalColIdx = hasArticles ? 7 : 6;
+  const emptyRow = new Array(header.length).fill("");
+  emptyRow[totalColIdx - 1] = "ИТОГО:";
+  emptyRow[totalColIdx] = result.grandTotal;
+  dataRows.push(emptyRow);
 
   if (result.notes) {
-    dataRows.push(["", "", "", "", "", "", ""]);
-    dataRows.push([`Примечания: ${result.notes}`, "", "", "", "", "", ""]);
+    dataRows.push(new Array(header.length).fill(""));
+    const noteRow = new Array(header.length).fill("");
+    noteRow[0] = `Примечания: ${result.notes}`;
+    dataRows.push(noteRow);
   }
 
   const wsData = [header, ...dataRows];
   const ws = XLSX.utils.aoa_to_sheet(wsData);
 
-  // Column widths
-  ws["!cols"] = [{ wch: 40 }, { wch: 40 }, { wch: 10 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 15 }];
+  ws["!cols"] = hasArticles
+    ? [{ wch: 38 }, { wch: 14 }, { wch: 38 }, { wch: 14 }, { wch: 10 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 15 }]
+    : [{ wch: 42 }, { wch: 14 }, { wch: 42 }, { wch: 10 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 15 }];
 
   XLSX.utils.book_append_sheet(wb, ws, "Результат");
   return XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;

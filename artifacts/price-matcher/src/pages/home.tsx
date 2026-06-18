@@ -324,12 +324,14 @@ export default function Home() {
                 <Table>
                   <TableHeader className="bg-muted/50">
                     <TableRow>
-                      <TableHead className="w-[300px] font-medium text-muted-foreground">Наименование</TableHead>
+                      <TableHead className="w-[260px] font-medium text-muted-foreground">Наименование</TableHead>
+                      <TableHead className="w-[110px] font-medium text-muted-foreground">Артикул</TableHead>
                       <TableHead className="font-medium text-muted-foreground">Совпадение в прайсе</TableHead>
-                      <TableHead className="text-right font-medium text-muted-foreground w-[100px]">Кол-во</TableHead>
-                      <TableHead className="font-medium text-muted-foreground w-[80px]">Ед.</TableHead>
-                      <TableHead className="text-right font-medium text-muted-foreground w-[120px]">Цена за ед.</TableHead>
-                      <TableHead className="text-right font-medium text-muted-foreground w-[120px]">Сумма</TableHead>
+                      <TableHead className="w-[110px] font-medium text-muted-foreground">Арт. прайса</TableHead>
+                      <TableHead className="text-right font-medium text-muted-foreground w-[80px]">Кол-во</TableHead>
+                      <TableHead className="font-medium text-muted-foreground w-[70px]">Ед.</TableHead>
+                      <TableHead className="text-right font-medium text-muted-foreground w-[110px]">Цена за ед.</TableHead>
+                      <TableHead className="text-right font-medium text-muted-foreground w-[110px]">Сумма</TableHead>
                       <TableHead className="text-center font-medium text-muted-foreground w-[100px]">Статус</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -340,8 +342,14 @@ export default function Home() {
                         className={!item.found ? "bg-amber-50/50 dark:bg-amber-950/20" : ""}
                       >
                         <TableCell className="font-medium">{item.name}</TableCell>
+                        <TableCell className="text-muted-foreground text-xs font-mono">
+                          {(item as unknown as { article?: string | null }).article || "-"}
+                        </TableCell>
                         <TableCell className="text-muted-foreground text-sm">
                           {item.matchedName || "-"}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground text-xs font-mono">
+                          {(item as unknown as { matchedArticle?: string | null }).matchedArticle || "-"}
                         </TableCell>
                         <TableCell className="text-right">{item.quantity}</TableCell>
                         <TableCell>{item.unit || "-"}</TableCell>
