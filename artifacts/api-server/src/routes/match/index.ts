@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import multer from "multer";
-import { matchPricesSSE } from "../../lib/aiMatcher";
+import { matchPricesSSE, matchPricesSSEDual } from "../../lib/aiMatcher";
 import { parsePriceList, parseOrderList, buildExcelFromResult, previewPriceFile, previewOrderFile } from "../../lib/fileParser";
 import { logger } from "../../lib/logger";
 import type { MatchResult } from "../../lib/aiMatcher";
@@ -62,7 +62,11 @@ router.post(
 // POST /match
 router.post(
   "/match",
-  upload.fields([{ name: "priceFile", maxCount: 1 }, { name: "orderFile", maxCount: 1 }]),
+  upload.fields([
+    { name: "priceFile", maxCount: 1 },
+    { name: "priceFile2", maxCount: 1 },
+    { name: "orderFile", maxCount: 1 },
+  ]),
   async (req, res): Promise<void> => {
     const files = req.files as Record<string, Express.Multer.File[]> | undefined;
     if (!files?.priceFile?.[0] || !files?.orderFile?.[0]) {
@@ -81,8 +85,9 @@ router.post(
     };
 
     const priceBuffer = files.priceFile[0].buffer;
+    const priceBuffer2 = files.priceFile2?.[0]?.buffer;
     const orderBuffer = files.orderFile[0].buffer;
-    const sessionId = hashFiles(priceBuffer, orderBuffer);
+    const sessionId = hashFiles(priceBuffer, orderBuffer, priceBuffer2);
 
     // Optional column overrides and flags passed from frontend
     const body = req.body as Record<string, string>;
@@ -104,6 +109,11 @@ router.post(
       priceColumn: body.priceColumn || undefined,
       articleColumn: body.articleColumn || undefined,
     };
+    const priceColOverrides2 = {
+      nameColumn: body.nameColumn2 || undefined,
+      priceColumn: body.priceColumn2 || undefined,
+      articleColumn: body.articleColumn2 || undefined,
+    };
     const orderColOverrides = {
       nameColumn: body.orderNameColumn || undefined,
       qtyColumn: body.orderQtyColumn || undefined,
@@ -111,10 +121,18 @@ router.post(
     };
 
     let priceData: ReturnType<typeof parsePriceList>;
+    let priceData2: ReturnType<typeof parsePriceList> | null = null;
     let orderItems: ReturnType<typeof parseOrderList>;
 
     try {
       priceData = parsePriceList(priceBuffer, priceColOverrides);
+      if (priceBuffer2) {
+        try {
+          priceData2 = parsePriceList(priceBuffer2, priceColOverrides2);
+        } catch (err) {
+          req.log.warn({ err }, "Failed to parse second price file — proceeding with first only");
+        }
+      }
       orderItems = parseOrderList(orderBuffer, orderColOverrides);
     } catch (err) {
       req.log.error({ err }, "Failed to parse files");
@@ -134,30 +152,34 @@ router.post(
       return;
     }
 
-    req.log.info({ priceItemCount: priceData.items.length, orderItemCount: orderItems.length }, "Files parsed");
+    const isDual = priceData2 !== null && priceData2.items.length > 0;
+    req.log.info({ priceItemCount: priceData.items.length, priceItemCount2: priceData2?.items.length ?? 0, orderItemCount: orderItems.length, isDual }, "Files parsed");
     send("status", {
       message: `Найдено ${orderItems.length} позиций. Начинаем подбор цен...`,
-      priceCount: priceData.items.length,
+      priceCount: priceData.items.length + (priceData2?.items.length ?? 0),
       orderCount: orderItems.length,
     });
 
     try {
-      const result = await matchPricesSSE(
-        orderItems,
-        priceData.items,
-        priceData.currency,
-        (batchIndex, totalBatches, batchSize) => {
-          send("progress", {
-            batchIndex,
-            totalBatches,
-            batchSize,
-            processed: Math.min(batchIndex * batchSize, orderItems.length),
-            total: orderItems.length,
-          });
-        }
-      );
+      const onProgress = (batchIndex: number, totalBatches: number, batchSize: number) => {
+        send("progress", {
+          batchIndex,
+          totalBatches,
+          batchSize,
+          processed: Math.min(batchIndex * batchSize, orderItems.length),
+          total: orderItems.length,
+        });
+      };
 
-      setCached(sessionId, result, priceData.items);
+      const result = isDual
+        ? await matchPricesSSEDual(orderItems, priceData.items, priceData2!.items, priceData.currency, onProgress)
+        : await matchPricesSSE(orderItems, priceData.items, priceData.currency, onProgress);
+
+      const allPriceItems = isDual
+        ? [...priceData.items, ...priceData2!.items]
+        : priceData.items;
+
+      setCached(sessionId, result, allPriceItems);
       req.log.info({ sessionId: sessionId.slice(0, 8) }, "Result cached");
       send("result", { ...result, sessionId });
       res.end();

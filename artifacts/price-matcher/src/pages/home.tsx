@@ -24,6 +24,7 @@ interface RichMatchedItem {
   matchMethod?: "article" | "embedded_code" | "name" | "none";
   matchedName: string | null;
   matchedArticle?: string | null;
+  priceSource?: 1 | 2 | null;
 }
 
 interface RichMatchResult extends MatchResult {
@@ -153,6 +154,16 @@ export default function Home() {
     document.addEventListener("mouseup", onUp);
   }, [colWidths]);
 
+  // Second price file
+  const [showPriceFile2, setShowPriceFile2] = useState(false);
+  const [priceFile2, setPriceFile2] = useState<File | null>(null);
+  const [pricePreview2, setPricePreview2] = useState<PriceFilePreview | null>(null);
+  const [isPreviewLoading2, setIsPreviewLoading2] = useState(false);
+  const [selectedNameCol2, setSelectedNameCol2] = useState<string>("");
+  const [selectedPriceCol2, setSelectedPriceCol2] = useState<string>("");
+  const [selectedArticleCol2, setSelectedArticleCol2] = useState<string>(NONE_VALUE);
+  const [showColumnConfig2, setShowColumnConfig2] = useState(false);
+
   // Column selection state — price file
   const [pricePreview, setPricePreview] = useState<PriceFilePreview | null>(null);
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
@@ -199,6 +210,26 @@ export default function Home() {
     }
   }, []);
 
+  const loadPricePreview2 = useCallback(async (file: File) => {
+    setIsPreviewLoading2(true);
+    setPricePreview2(null);
+    try {
+      const fd = new FormData();
+      fd.append("priceFile", file);
+      const res = await fetch("/api/match/preview-price", { method: "POST", body: fd });
+      if (!res.ok) throw new Error("preview failed");
+      const preview = await res.json() as PriceFilePreview;
+      setPricePreview2(preview);
+      setSelectedNameCol2(preview.detected.nameColumn ?? preview.columns[0] ?? "");
+      setSelectedPriceCol2(preview.detected.priceColumn ?? "");
+      setSelectedArticleCol2(preview.detected.articleColumn ?? NONE_VALUE);
+    } catch {
+      setPricePreview2(null);
+    } finally {
+      setIsPreviewLoading2(false);
+    }
+  }, []);
+
   const loadOrderPreview = useCallback(async (file: File) => {
     setIsOrderPreviewLoading(true);
     setOrderPreview(null);
@@ -226,6 +257,13 @@ export default function Home() {
     if (file) void loadPricePreview(file);
   };
 
+  const handlePriceFile2Select = (file: File | null) => {
+    setPriceFile2(file);
+    setPricePreview2(null);
+    setShowColumnConfig2(false);
+    if (file) void loadPricePreview2(file);
+  };
+
   const handleOrderFileSelect = (file: File | null) => {
     setOrderFile(file);
     setOrderPreview(null);
@@ -237,6 +275,10 @@ export default function Home() {
   useEffect(() => {
     if (pricePreview && pricePreview.columns.length > 0) setShowColumnConfig(true);
   }, [pricePreview]);
+
+  useEffect(() => {
+    if (pricePreview2 && pricePreview2.columns.length > 0) setShowColumnConfig2(true);
+  }, [pricePreview2]);
 
   useEffect(() => {
     if (orderPreview && orderPreview.columns.length > 0) setShowOrderColumnConfig(true);
@@ -268,6 +310,12 @@ export default function Home() {
       if (selectedNameCol) formData.append("nameColumn", selectedNameCol);
       if (selectedPriceCol) formData.append("priceColumn", selectedPriceCol);
       if (selectedArticleCol && selectedArticleCol !== NONE_VALUE) formData.append("articleColumn", selectedArticleCol);
+      if (priceFile2) {
+        formData.append("priceFile2", priceFile2);
+        if (selectedNameCol2) formData.append("nameColumn2", selectedNameCol2);
+        if (selectedPriceCol2) formData.append("priceColumn2", selectedPriceCol2);
+        if (selectedArticleCol2 && selectedArticleCol2 !== NONE_VALUE) formData.append("articleColumn2", selectedArticleCol2);
+      }
       if (selectedOrderNameCol) formData.append("orderNameColumn", selectedOrderNameCol);
       if (selectedOrderQtyCol) formData.append("orderQtyColumn", selectedOrderQtyCol);
       if (selectedOrderArticleCol && selectedOrderArticleCol !== NONE_VALUE) formData.append("orderArticleColumn", selectedOrderArticleCol);
@@ -413,6 +461,9 @@ export default function Home() {
     setSearchResults(new Map()); setSearchLoading(new Map()); setEditingPrice(new Map());
     setPricePreview(null); setSelectedNameCol(""); setSelectedPriceCol("");
     setSelectedArticleCol(NONE_VALUE); setShowColumnConfig(false);
+    setPriceFile2(null); setShowPriceFile2(false); setPricePreview2(null);
+    setSelectedNameCol2(""); setSelectedPriceCol2("");
+    setSelectedArticleCol2(NONE_VALUE); setShowColumnConfig2(false);
     setOrderPreview(null); setSelectedOrderNameCol(""); setSelectedOrderQtyCol("");
     setSelectedOrderArticleCol(NONE_VALUE); setShowOrderColumnConfig(false);
     setPendingCachedResult(null); skipCacheRef.current = false;
@@ -648,6 +699,90 @@ export default function Home() {
     );
   };
 
+  // ── Second price column selector UI ─────────────────────────────────────────
+  const ColumnSelector2 = () => {
+    if (!priceFile2) return null;
+    if (isPreviewLoading2) {
+      return (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground mt-3 px-1">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          <span>Определяем колонки прайса 2...</span>
+        </div>
+      );
+    }
+    if (!pricePreview2 || pricePreview2.columns.length === 0) return null;
+
+    const cols = pricePreview2.columns;
+    const samples = pricePreview2.samples;
+
+    const samplePreview = (col: string) => {
+      const vals = samples[col] ?? [];
+      if (!vals.length) return null;
+      return <span className="text-muted-foreground/70 truncate max-w-[160px] block">{vals.slice(0, 2).join(", ")}</span>;
+    };
+
+    return (
+      <div className="mt-2 rounded-lg border border-orange-200 bg-orange-50/30">
+        <button
+          type="button"
+          onClick={() => setShowColumnConfig2((v) => !v)}
+          className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium hover:bg-orange-50/60 transition-colors rounded-lg"
+        >
+          <span className="flex items-center gap-2">
+            <span>Колонки прайса 2</span>
+            {selectedNameCol2 && selectedPriceCol2 && (
+              <Badge variant="outline" className="text-[11px] font-normal bg-orange-50 text-orange-700 border-orange-200">
+                {selectedNameCol2} / {selectedPriceCol2}
+              </Badge>
+            )}
+          </span>
+          <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${showColumnConfig2 ? "rotate-180" : ""}`} />
+        </button>
+
+        {showColumnConfig2 && (
+          <div className="px-4 pb-4 space-y-4 border-t border-orange-200 pt-4">
+            <p className="text-xs text-muted-foreground">
+              Система автоматически определила колонки. Проверьте и при необходимости скорректируйте.
+            </p>
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-foreground">Колонка с названием</label>
+                <Select value={selectedNameCol2} onValueChange={setSelectedNameCol2}>
+                  <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Выберите колонку" /></SelectTrigger>
+                  <SelectContent className="max-h-[210px] overflow-y-auto">
+                    {cols.map((col) => <SelectItem key={col} value={col} className="text-xs"><span className="font-medium">{col}</span></SelectItem>)}
+                  </SelectContent>
+                </Select>
+                {samplePreview(selectedNameCol2)}
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-foreground">Колонка с ценой</label>
+                <Select value={selectedPriceCol2} onValueChange={setSelectedPriceCol2}>
+                  <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Выберите колонку" /></SelectTrigger>
+                  <SelectContent className="max-h-[210px] overflow-y-auto">
+                    {cols.map((col) => <SelectItem key={col} value={col} className="text-xs"><span className="font-medium">{col}</span></SelectItem>)}
+                  </SelectContent>
+                </Select>
+                {samplePreview(selectedPriceCol2)}
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-foreground">Артикул <span className="text-muted-foreground font-normal">(необязательно)</span></label>
+                <Select value={selectedArticleCol2} onValueChange={setSelectedArticleCol2}>
+                  <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Не выбрано" /></SelectTrigger>
+                  <SelectContent className="max-h-[210px] overflow-y-auto">
+                    <SelectItem value={NONE_VALUE} className="text-xs text-muted-foreground">Не выбрано</SelectItem>
+                    {cols.map((col) => <SelectItem key={col} value={col} className="text-xs"><span className="font-medium">{col}</span></SelectItem>)}
+                  </SelectContent>
+                </Select>
+                {selectedArticleCol2 && selectedArticleCol2 !== NONE_VALUE && samplePreview(selectedArticleCol2)}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="min-h-screen bg-background text-foreground pb-12">
       {/* Header */}
@@ -705,8 +840,32 @@ export default function Home() {
 
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-0">
-                  <Dropzone label="Прайс-лист" accept=".xlsx,.xls,.csv" file={priceFile} onFileSelect={handlePriceFileSelect} />
+                  <Dropzone label="Прайс-лист 1" accept=".xlsx,.xls,.csv" file={priceFile} onFileSelect={handlePriceFileSelect} />
                   <ColumnSelector />
+                  {!showPriceFile2 ? (
+                    <button
+                      type="button"
+                      onClick={() => setShowPriceFile2(true)}
+                      className="mt-3 w-full text-xs text-primary border border-dashed border-primary/40 rounded-lg py-2 hover:bg-primary/5 transition-colors font-medium"
+                    >
+                      + Добавить второй прайс-лист
+                    </button>
+                  ) : (
+                    <div className="mt-3 space-y-0">
+                      <div className="flex items-center justify-between mb-1.5 px-0.5">
+                        <span className="text-xs font-medium text-orange-700">Прайс-лист 2</span>
+                        <button
+                          type="button"
+                          onClick={() => { setShowPriceFile2(false); handlePriceFile2Select(null); }}
+                          className="text-xs text-muted-foreground hover:text-foreground"
+                        >
+                          Убрать
+                        </button>
+                      </div>
+                      <Dropzone label="Прайс-лист 2" accept=".xlsx,.xls,.csv" file={priceFile2} onFileSelect={handlePriceFile2Select} />
+                      <ColumnSelector2 />
+                    </div>
+                  )}
                 </div>
                 <div className="space-y-0">
                   <Dropzone label="Список товаров" accept=".xlsx,.xls,.csv" file={orderFile} onFileSelect={handleOrderFileSelect} />
@@ -911,12 +1070,22 @@ export default function Home() {
                           </TableCell>
 
                           <TableCell className="text-center py-2">
-                            <div className="flex items-center justify-center gap-1">
-                              {methodBadge(item, ov)}
-                              {ov && (
-                                <button onClick={() => clearOverride(idx)} className="text-muted-foreground hover:text-foreground ml-1" title="Сбросить">
-                                  <X className="h-3 w-3" />
-                                </button>
+                            <div className="flex flex-col items-center gap-1">
+                              <div className="flex items-center gap-1">
+                                {methodBadge(item, ov)}
+                                {ov && (
+                                  <button onClick={() => clearOverride(idx)} className="text-muted-foreground hover:text-foreground ml-1" title="Сбросить">
+                                    <X className="h-3 w-3" />
+                                  </button>
+                                )}
+                              </div>
+                              {effectiveItem.priceSource != null && (
+                                <Badge
+                                  variant="outline"
+                                  className={`text-[10px] font-medium px-1.5 py-0 h-4 ${effectiveItem.priceSource === 1 ? "bg-blue-50 text-blue-600 border-blue-200" : "bg-orange-50 text-orange-600 border-orange-200"}`}
+                                >
+                                  П{effectiveItem.priceSource}
+                                </Badge>
                               )}
                             </div>
                           </TableCell>

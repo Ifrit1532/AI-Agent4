@@ -32,6 +32,11 @@ export interface MatchedItem {
   matchMethod: "article" | "embedded_code" | "name" | "none";
   matchedName: string | null;
   matchedArticle: string | null;
+  priceSource?: 1 | 2;
+}
+
+interface TaggedPriceItem extends PriceItem {
+  _source: 1 | 2;
 }
 
 export interface MatchResult {
@@ -206,6 +211,115 @@ function findCandidates(
   return { candidates: scored.map((x) => x.item), extractedCodes };
 }
 
+// ─── Dual price list helpers ──────────────────────────────────────────────────
+
+function findCandidatesDual(
+  orderItem: OrderItem,
+  priceItems1: PriceItem[],
+  priceItems2: PriceItem[],
+  topN = 12
+): { candidates: TaggedPriceItem[]; extractedCodes: string[] } {
+  const extractedCodes = extractProductCodes(orderItem.name);
+  const tagged1: TaggedPriceItem[] = priceItems1.map((p) => ({ ...p, _source: 1 as const }));
+  const tagged2: TaggedPriceItem[] = priceItems2.map((p) => ({ ...p, _source: 2 as const }));
+  const all: TaggedPriceItem[] = [...tagged1, ...tagged2];
+
+  const scored = all
+    .map((p) => ({ scored: scoreCandidate(orderItem, p), taggedItem: p }))
+    .filter((x) => x.scored.score > 0)
+    .sort((a, b) => b.scored.score - a.scored.score)
+    .slice(0, topN);
+
+  if (scored.length === 0) {
+    const normOrder = normalize(orderItem.name).split(" ").filter((w) => w.length > 2);
+    const fallback = all
+      .filter((p) => {
+        const pn = normalize(p.name);
+        return normOrder.some((kw) => pn.includes(kw.slice(0, 4)));
+      })
+      .slice(0, topN);
+    return { candidates: fallback, extractedCodes };
+  }
+
+  return { candidates: scored.map((x) => x.taggedItem), extractedCodes };
+}
+
+interface BatchOrderItemDual {
+  orderItem: OrderItem;
+  candidates: TaggedPriceItem[];
+  extractedCodes: string[];
+}
+
+async function matchBatchDual(batchItems: BatchOrderItemDual[], currency: string): Promise<MatchedItem[]> {
+  const systemPrompt = `You are a procurement assistant doing fuzzy product matching.
+Candidates are labeled [П1] (from price list 1) or [П2] (from price list 2).
+
+Rules:
+1. If an order item name contains an embedded product/part code (e.g. "Блок лазера Lexmark 40X8080" → code "40X8080"), prioritize candidates where that code matches the article or appears in the name.
+2. If an explicit article is given for the order item, prioritize article match over name similarity.
+3. Otherwise match by name similarity (abbreviations, synonyms, word order OK).
+4. You may match from either price list — pick the best overall match.
+
+Return ONLY a valid JSON array (no markdown, no extra text) with exactly one object per order item, in the same order:
+[
+  {
+    "name": "<original order item name>",
+    "article": "<original order item article or null>",
+    "extractedCodes": ["<code1>", ...],
+    "quantity": <number>,
+    "unit": "<unit or null>",
+    "unitPrice": <price or null if no good match>,
+    "totalPrice": <unitPrice * quantity or null>,
+    "found": <true or false>,
+    "matchMethod": "<article|embedded_code|name|none>",
+    "matchedName": "<matched candidate name or null>",
+    "matchedArticle": "<matched candidate article or null>",
+    "priceSource": <1 or 2 — which price list the match came from, or null if not found>
+  }
+]`;
+
+  const lines = batchItems.map((b, i) => {
+    const artPart = b.orderItem.article ? ` арт.=${b.orderItem.article}` : "";
+    const codesPart =
+      b.extractedCodes.length > 0
+        ? ` [коды в названии: ${b.extractedCodes.join(", ")}]`
+        : "";
+    const candidateList =
+      b.candidates.length > 0
+        ? b.candidates
+            .map((c) => {
+              const artStr = c.article ? ` [арт: ${c.article}]` : "";
+              const unitStr = c.unit ? ` (${c.unit})` : "";
+              return `    - [П${c._source}] ${c.name}${artStr}: ${c.price}${unitStr}`;
+            })
+            .join("\n")
+        : "    (нет кандидатов)";
+
+    return `[${i + 1}] "${b.orderItem.name}"${artPart}${codesPart} qty=${b.orderItem.quantity}${b.orderItem.unit ? ` ${b.orderItem.unit}` : ""}
+  Candidates:
+${candidateList}`;
+  });
+
+  const userPrompt = `Currency: ${currency}\n\n${lines.join("\n\n")}`;
+
+  const response = await openai.chat.completions.create({
+    model: "deepseek-chat",
+    max_tokens: 8000,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+  });
+
+  const content = response.choices[0]?.message?.content ?? "";
+  const jsonMatch = content.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) {
+    throw new Error(`AI did not return a valid JSON array. Snippet: ${content.slice(0, 200)}`);
+  }
+
+  return JSON.parse(jsonMatch[0]) as MatchedItem[];
+}
+
 // ─── AI batch processing ──────────────────────────────────────────────────────
 
 interface BatchOrderItem {
@@ -322,6 +436,51 @@ export async function matchPricesSSE(
   const notes =
     notFoundCount > 0
       ? `${notFoundCount} из ${allMatched.length} позиций не найдено в прайс-листе`
+      : null;
+
+  return { items: allMatched, grandTotal, currency, notes };
+}
+
+// ─── Dual price list entry point ──────────────────────────────────────────────
+
+export async function matchPricesSSEDual(
+  orderItems: OrderItem[],
+  priceItems1: PriceItem[],
+  priceItems2: PriceItem[],
+  currency: string,
+  onProgress: (batchIndex: number, totalBatches: number, batchSize: number) => void
+): Promise<MatchResult> {
+  logger.info(
+    { orderCount: orderItems.length, priceCount1: priceItems1.length, priceCount2: priceItems2.length },
+    "Starting dual price matching"
+  );
+
+  const batchedItems: BatchOrderItemDual[] = orderItems.map((orderItem) => {
+    const { candidates, extractedCodes } = findCandidatesDual(orderItem, priceItems1, priceItems2, 12);
+    return { orderItem, candidates, extractedCodes };
+  });
+
+  const batches: BatchOrderItemDual[][] = [];
+  for (let i = 0; i < batchedItems.length; i += BATCH_SIZE) {
+    batches.push(batchedItems.slice(i, i + BATCH_SIZE));
+  }
+
+  logger.info({ batchCount: batches.length }, "Dual batches prepared");
+
+  const allMatched: MatchedItem[] = [];
+
+  for (let i = 0; i < batches.length; i++) {
+    logger.info({ batchIndex: i + 1, batchCount: batches.length }, "Processing dual batch");
+    onProgress(i + 1, batches.length, BATCH_SIZE);
+    const matched = await matchBatchDual(batches[i], currency);
+    allMatched.push(...matched);
+  }
+
+  const grandTotal = allMatched.reduce((sum, item) => sum + (item.totalPrice ?? 0), 0);
+  const notFoundCount = allMatched.filter((i) => !i.found).length;
+  const notes =
+    notFoundCount > 0
+      ? `${notFoundCount} из ${allMatched.length} позиций не найдено в прайс-листах`
       : null;
 
   return { items: allMatched, grandTotal, currency, notes };

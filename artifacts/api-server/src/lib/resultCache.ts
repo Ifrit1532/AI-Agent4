@@ -13,13 +13,10 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 const cache = new Map<string, CacheEntry>();
 
-export function hashFiles(priceBuffer: Buffer, orderBuffer: Buffer): string {
-  return crypto
-    .createHash("sha256")
-    .update(priceBuffer)
-    .update("|")
-    .update(orderBuffer)
-    .digest("hex");
+export function hashFiles(priceBuffer: Buffer, orderBuffer: Buffer, priceBuffer2?: Buffer): string {
+  const hash = crypto.createHash("sha256").update(priceBuffer).update("|").update(orderBuffer);
+  if (priceBuffer2) hash.update("|2|").update(priceBuffer2);
+  return hash.digest("hex");
 }
 
 function isAlive(entry: CacheEntry): boolean {
