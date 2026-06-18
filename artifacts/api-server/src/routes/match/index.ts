@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import multer from "multer";
 import { matchPricesSSE } from "../../lib/aiMatcher";
-import { parsePriceList, parseOrderList, buildExcelFromResult, previewPriceFile } from "../../lib/fileParser";
+import { parsePriceList, parseOrderList, buildExcelFromResult, previewPriceFile, previewOrderFile } from "../../lib/fileParser";
 import { logger } from "../../lib/logger";
 import type { MatchResult } from "../../lib/aiMatcher";
 import { hashFiles, getCached, setCached, searchPriceItems } from "../../lib/resultCache";
@@ -34,6 +34,26 @@ router.post(
       res.json(preview);
     } catch (err) {
       req.log.error({ err }, "Failed to preview price file");
+      res.status(400).json({ error: "Не удалось прочитать файл." });
+    }
+  }
+);
+
+// POST /match/preview-order — returns columns + samples + auto-detected suggestions for order file
+router.post(
+  "/match/preview-order",
+  upload.fields([{ name: "orderFile", maxCount: 1 }]),
+  (req, res): void => {
+    const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+    if (!files?.orderFile?.[0]) {
+      res.status(400).json({ error: "Необходимо загрузить orderFile" });
+      return;
+    }
+    try {
+      const preview = previewOrderFile(files.orderFile[0].buffer);
+      res.json(preview);
+    } catch (err) {
+      req.log.error({ err }, "Failed to preview order file");
       res.status(400).json({ error: "Не удалось прочитать файл." });
     }
   }
@@ -78,18 +98,23 @@ router.post(
 
     // Optional column overrides passed from frontend after user selection
     const body = req.body as Record<string, string>;
-    const colOverrides = {
+    const priceColOverrides = {
       nameColumn: body.nameColumn || undefined,
       priceColumn: body.priceColumn || undefined,
       articleColumn: body.articleColumn || undefined,
+    };
+    const orderColOverrides = {
+      nameColumn: body.orderNameColumn || undefined,
+      qtyColumn: body.orderQtyColumn || undefined,
+      articleColumn: body.orderArticleColumn || undefined,
     };
 
     let priceData: ReturnType<typeof parsePriceList>;
     let orderItems: ReturnType<typeof parseOrderList>;
 
     try {
-      priceData = parsePriceList(priceBuffer, colOverrides);
-      orderItems = parseOrderList(orderBuffer);
+      priceData = parsePriceList(priceBuffer, priceColOverrides);
+      orderItems = parseOrderList(orderBuffer, orderColOverrides);
     } catch (err) {
       req.log.error({ err }, "Failed to parse files");
       send("error", { error: "Не удалось прочитать файлы. Убедитесь, что файлы в формате Excel или CSV." });

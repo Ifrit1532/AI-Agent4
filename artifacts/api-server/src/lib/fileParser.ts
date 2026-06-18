@@ -132,33 +132,184 @@ export interface PriceFilePreview {
   };
 }
 
+export interface OrderFilePreview {
+  columns: string[];
+  samples: Record<string, string[]>;
+  detected: {
+    nameColumn: string | null;
+    qtyColumn: string | null;
+    articleColumn: string | null;
+  };
+}
+
 export interface PriceColumnOverrides {
   nameColumn?: string;
   priceColumn?: string;
   articleColumn?: string;
 }
 
-/** Extract all unique column headers from the first sheet */
-function getColumnsFromBuffer(buffer: Buffer): { columns: string[]; rows: Record<string, unknown>[] } {
-  const rows = allSheetsToRows(buffer);
-  const seen = new Set<string>();
-  const columns: string[] = [];
-  for (const row of rows) {
-    for (const key of Object.keys(row)) {
-      if (!seen.has(key)) { seen.add(key); columns.push(key); }
-    }
-    if (columns.length > 0) break; // keys are stable across rows for sheet_to_json
-  }
-  return { columns, rows };
+export interface OrderColumnOverrides {
+  nameColumn?: string;
+  qtyColumn?: string;
+  articleColumn?: string;
 }
 
-export function previewPriceFile(buffer: Buffer): PriceFilePreview {
-  const { columns, rows } = getColumnsFromBuffer(buffer);
+/**
+ * Read a workbook and find the best header row by scanning the first 30 rows.
+ * Scores rows by how many cells match known header keywords.
+ * Returns columns, data rows, and the header row index found.
+ */
+function buildColumnsAndRows(
+  buffer: Buffer,
+  multiSheet: boolean,
+): { columns: string[]; rows: Record<string, unknown>[]; headerRowIndex: number } {
+  const workbook = XLSX.read(buffer, { type: "buffer", cellStyles: true });
+  const sheetNames = (
+    multiSheet ? workbook.SheetNames : [workbook.SheetNames[0]].filter(Boolean)
+  ) as string[];
 
-  // Collect up to 3 non-empty sample values per column
+  let bestScore = -Infinity;
+  let bestResult: { columns: string[]; rows: Record<string, unknown>[]; headerRowIndex: number } = {
+    columns: [],
+    rows: [],
+    headerRowIndex: 0,
+  };
+
+  for (const sheetName of sheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) continue;
+
+    // Read as raw array-of-arrays so we can find the actual header row
+    const rawRows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+      header: 1,
+      defval: null,
+      raw: false,
+    });
+
+    let sheetBestScore = -Infinity;
+    let sheetBestIdx = 0;
+
+    for (let i = 0; i < Math.min(rawRows.length, 30); i++) {
+      const row = rawRows[i] ?? [];
+      const cells = row.map((c) => String(c ?? "").trim());
+      const nonEmpty = cells.filter((v) => v.length > 0);
+      if (nonEmpty.length < 2) continue;
+
+      let score = 0;
+      let textCells = 0;
+
+      for (const cell of nonEmpty) {
+        const h = normalizeHeader(cell);
+        if (isNameHeader(h)) score += 6;
+        else if (isPriceHeader(h)) score += 6;
+        else if (isQtyHeader(h)) score += 6;
+        else if (isArticleHeader(h)) score += 5;
+        else if (isUnitHeader(h)) score += 4;
+        else if (!isNumeric(cell) && cell.length <= 50) { score += 0.5; textCells++; }
+      }
+      // Bonus for rows with multiple text-like cells (more likely a header)
+      if (textCells >= 3) score += 3;
+      // Penalty: all-numeric rows are definitely data, not headers
+      if (nonEmpty.every((c) => isNumeric(c))) score -= 20;
+
+      if (score > sheetBestScore) {
+        sheetBestScore = score;
+        sheetBestIdx = i;
+      }
+    }
+
+    if (sheetBestScore > bestScore) {
+      bestScore = sheetBestScore;
+
+      const headerRow = rawRows[sheetBestIdx] ?? [];
+      const seen = new Set<string>();
+      const columns: string[] = [];
+      const colMap = new Map<number, string>();
+
+      for (let ci = 0; ci < headerRow.length; ci++) {
+        // Skip columns that have no data at all in the next 15 rows
+        const hasData = rawRows
+          .slice(sheetBestIdx + 1, sheetBestIdx + 16)
+          .some((r) => String((r as unknown[])[ci] ?? "").trim().length > 0);
+        const headerVal = String(headerRow[ci] ?? "").trim();
+        if (!hasData && headerVal.length === 0) continue;
+
+        let name = headerVal.length > 0 ? headerVal : `Колонка${ci + 1}`;
+        if (seen.has(name)) {
+          let s = 2;
+          while (seen.has(`${name}_${s}`)) s++;
+          name = `${name}_${s}`;
+        }
+        seen.add(name);
+        columns.push(name);
+        colMap.set(ci, name);
+      }
+
+      const rows: Record<string, unknown>[] = [];
+      for (let ri = sheetBestIdx + 1; ri < rawRows.length; ri++) {
+        const rawRow = rawRows[ri] ?? [];
+        const hasAny = rawRow.some((c) => String(c ?? "").trim().length > 0);
+        if (!hasAny) continue;
+        const row: Record<string, unknown> = {};
+        for (const [ci, colName] of colMap) {
+          row[colName] = rawRow[ci] ?? null;
+        }
+        rows.push(row);
+      }
+
+      bestResult = { columns, rows, headerRowIndex: sheetBestIdx };
+    }
+  }
+
+  return bestResult;
+}
+
+interface ColStats {
+  numericRatio: number;
+  textRatio: number;
+  avgLen: number;
+  articleRatio: number; // short mixed alphanumeric
+  maxNum: number;
+}
+
+/** Analyze data rows to understand what kind of data is in each column */
+function analyzeColumnStats(
+  rows: Record<string, unknown>[],
+  columns: string[],
+): Record<string, ColStats> {
+  const result: Record<string, ColStats> = {};
+  const sample = rows.slice(0, 100);
+
+  for (const col of columns) {
+    const vals = sample.map((r) => String(r[col] ?? "").trim()).filter((v) => v.length > 0);
+    if (!vals.length) {
+      result[col] = { numericRatio: 0, textRatio: 0, avgLen: 0, articleRatio: 0, maxNum: 0 };
+      continue;
+    }
+    const numeric = vals.filter((v) => isNumeric(v));
+    const numVals = numeric.map((v) => toNumber(v)).filter((v) => !isNaN(v));
+    const maxNum = numVals.length ? Math.max(...numVals) : 0;
+    // Article-like: has both letters and digits, not purely numeric, short
+    const articleLike = vals.filter(
+      (v) => !isNumeric(v) && v.length >= 2 && v.length <= 30 && /[A-Za-z]/.test(v) && /\d/.test(v),
+    );
+    result[col] = {
+      numericRatio: numeric.length / vals.length,
+      textRatio: (vals.length - numeric.length) / vals.length,
+      avgLen: vals.reduce((s, v) => s + v.length, 0) / vals.length,
+      articleRatio: articleLike.length / vals.length,
+      maxNum,
+    };
+  }
+  return result;
+}
+
+function collectSamples(
+  rows: Record<string, unknown>[],
+  columns: string[],
+): Record<string, string[]> {
   const samples: Record<string, string[]> = {};
   for (const col of columns) samples[col] = [];
-
   for (const row of rows) {
     let full = true;
     for (const col of columns) {
@@ -172,12 +323,18 @@ export function previewPriceFile(buffer: Buffer): PriceFilePreview {
     }
     if (full) break;
   }
+  return samples;
+}
 
-  // Auto-detect which columns match name/price/article
+function detectPriceColumns(
+  columns: string[],
+  rows: Record<string, unknown>[],
+): { nameColumn: string | null; priceColumn: string | null; articleColumn: string | null } {
   let nameColumn: string | null = null;
   let priceColumn: string | null = null;
   let articleColumn: string | null = null;
 
+  // Step 1: keyword matching on header names
   for (const col of columns) {
     const h = normalizeHeader(col);
     if (!articleColumn && isArticleHeader(h)) articleColumn = col;
@@ -185,22 +342,92 @@ export function previewPriceFile(buffer: Buffer): PriceFilePreview {
     if (!priceColumn && isPriceHeader(h)) priceColumn = col;
   }
 
-  // Fallback: if no price column found by header, pick first column with numeric sample values
+  // Step 2: data-driven detection for unresolved columns
+  const stats = analyzeColumnStats(rows, columns);
+
   if (!priceColumn) {
-    for (const col of columns) {
-      if (col === nameColumn || col === articleColumn) continue;
-      const sampleVals = samples[col] ?? [];
-      if (sampleVals.length > 0 && sampleVals.every((v) => isNumeric(v))) {
-        priceColumn = col;
-        break;
-      }
-    }
+    const candidates = columns
+      .filter((c) => c !== nameColumn && c !== articleColumn)
+      .filter((c) => (stats[c]?.numericRatio ?? 0) > 0.6)
+      .sort((a, b) => (stats[b]?.maxNum ?? 0) - (stats[a]?.maxNum ?? 0)); // larger numbers → price
+    if (candidates.length) priceColumn = candidates[0] ?? null;
   }
 
-  // Fallback: first column as name if nothing detected
-  if (!nameColumn && columns.length > 0) nameColumn = columns[0] ?? null;
+  if (!nameColumn) {
+    const candidates = columns
+      .filter((c) => c !== priceColumn && c !== articleColumn)
+      .filter((c) => (stats[c]?.textRatio ?? 0) > 0.4)
+      .sort((a, b) => (stats[b]?.avgLen ?? 0) - (stats[a]?.avgLen ?? 0)); // longer text → name
+    if (candidates.length) nameColumn = candidates[0] ?? null;
+  }
 
-  return { columns, samples, detected: { nameColumn, priceColumn, articleColumn } };
+  if (!articleColumn) {
+    const candidates = columns
+      .filter((c) => c !== nameColumn && c !== priceColumn)
+      .filter((c) => (stats[c]?.articleRatio ?? 0) > 0.25);
+    if (candidates.length) articleColumn = candidates[0] ?? null;
+  }
+
+  if (!nameColumn && columns.length > 0) nameColumn = columns[0] ?? null;
+  return { nameColumn, priceColumn, articleColumn };
+}
+
+function detectOrderColumns(
+  columns: string[],
+  rows: Record<string, unknown>[],
+): { nameColumn: string | null; qtyColumn: string | null; articleColumn: string | null } {
+  let nameColumn: string | null = null;
+  let qtyColumn: string | null = null;
+  let articleColumn: string | null = null;
+
+  for (const col of columns) {
+    const h = normalizeHeader(col);
+    if (!articleColumn && isArticleHeader(h)) articleColumn = col;
+    if (!nameColumn && isNameHeader(h)) nameColumn = col;
+    if (!qtyColumn && isQtyHeader(h)) qtyColumn = col;
+  }
+
+  const stats = analyzeColumnStats(rows, columns);
+
+  if (!qtyColumn) {
+    const candidates = columns
+      .filter((c) => c !== nameColumn && c !== articleColumn)
+      .filter((c) => (stats[c]?.numericRatio ?? 0) > 0.6)
+      .sort((a, b) => (stats[a]?.maxNum ?? 0) - (stats[b]?.maxNum ?? 0)); // smaller numbers → qty
+    if (candidates.length) qtyColumn = candidates[0] ?? null;
+  }
+
+  if (!nameColumn) {
+    const candidates = columns
+      .filter((c) => c !== qtyColumn && c !== articleColumn)
+      .filter((c) => (stats[c]?.textRatio ?? 0) > 0.4)
+      .sort((a, b) => (stats[b]?.avgLen ?? 0) - (stats[a]?.avgLen ?? 0));
+    if (candidates.length) nameColumn = candidates[0] ?? null;
+  }
+
+  if (!articleColumn) {
+    const candidates = columns
+      .filter((c) => c !== nameColumn && c !== qtyColumn)
+      .filter((c) => (stats[c]?.articleRatio ?? 0) > 0.25);
+    if (candidates.length) articleColumn = candidates[0] ?? null;
+  }
+
+  if (!nameColumn && columns.length > 0) nameColumn = columns[0] ?? null;
+  return { nameColumn, qtyColumn, articleColumn };
+}
+
+export function previewPriceFile(buffer: Buffer): PriceFilePreview {
+  const { columns, rows } = buildColumnsAndRows(buffer, true);
+  const samples = collectSamples(rows, columns);
+  const detected = detectPriceColumns(columns, rows);
+  return { columns, samples, detected };
+}
+
+export function previewOrderFile(buffer: Buffer): OrderFilePreview {
+  const { columns, rows } = buildColumnsAndRows(buffer, false);
+  const samples = collectSamples(rows, columns);
+  const detected = detectOrderColumns(columns, rows);
+  return { columns, samples, detected };
 }
 
 export function parsePriceList(
@@ -291,47 +518,33 @@ export function parsePriceList(
   return { items, currency };
 }
 
-export function parseOrderList(buffer: Buffer): OrderItem[] {
-  const rows = firstSheetToRows(buffer);
+export function parseOrderList(buffer: Buffer, overrides?: OrderColumnOverrides): OrderItem[] {
+  const { columns, rows } = buildColumnsAndRows(buffer, false);
   const items: OrderItem[] = [];
 
-  let nameKey = "";
-  let qtyKey = "";
+  // Apply overrides or auto-detect
+  const detected = detectOrderColumns(columns, rows);
+  const nameKey = overrides?.nameColumn || detected.nameColumn || columns[0] || "";
+  const qtyKey = overrides?.qtyColumn || detected.qtyColumn || "";
+  const articleKey = overrides?.articleColumn || detected.articleColumn || "";
+
+  // Find unit column
   let unitKey = "";
-  let articleKey = "";
+  for (const col of columns) {
+    if (col !== nameKey && col !== qtyKey && col !== articleKey && isUnitHeader(normalizeHeader(col))) {
+      unitKey = col;
+      break;
+    }
+  }
 
   for (const row of rows) {
-    const keys = Object.keys(row);
-    if (keys.length < 2) continue;
-
-    // Detect columns per row (headers may shift per row in some formats)
-    for (const key of keys) {
-      const h = normalizeHeader(key);
-      if (!articleKey && isArticleHeader(h)) articleKey = key;
-      if (!nameKey && isNameHeader(h)) nameKey = key;
-      if (!qtyKey && isQtyHeader(h)) qtyKey = key;
-      if (!unitKey && isUnitHeader(h)) unitKey = key;
-    }
-
-    if (!nameKey) nameKey = keys[0];
-    if (!qtyKey) {
-      for (const key of keys) {
-        if (key !== nameKey && key !== articleKey && isNumeric(row[key])) {
-          qtyKey = key;
-          break;
-        }
-      }
-    }
-
     const nameVal = String(row[nameKey] ?? "").trim();
     const qtyVal = row[qtyKey];
 
     if (!nameVal || !qtyVal || !isNumeric(qtyVal)) continue;
     if (nameVal.toLowerCase() === normalizeHeader(nameKey)) continue;
 
-    const articleVal = articleKey
-      ? String(row[articleKey] ?? "").trim() || null
-      : null;
+    const articleVal = articleKey ? String(row[articleKey] ?? "").trim() || null : null;
 
     items.push({
       name: nameVal,

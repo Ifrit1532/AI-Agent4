@@ -63,6 +63,16 @@ interface PriceFilePreview {
   };
 }
 
+interface OrderFilePreview {
+  columns: string[];
+  samples: Record<string, string[]>;
+  detected: {
+    nameColumn: string | null;
+    qtyColumn: string | null;
+    articleColumn: string | null;
+  };
+}
+
 async function* readSSEEvents(response: Response): AsyncGenerator<{ event: string; data: unknown }> {
   const reader = response.body!.getReader();
   const decoder = new TextDecoder();
@@ -108,13 +118,21 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [fromCache, setFromCache] = useState(false);
 
-  // Column selection state
+  // Column selection state — price file
   const [pricePreview, setPricePreview] = useState<PriceFilePreview | null>(null);
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
   const [selectedNameCol, setSelectedNameCol] = useState<string>("");
   const [selectedPriceCol, setSelectedPriceCol] = useState<string>("");
   const [selectedArticleCol, setSelectedArticleCol] = useState<string>(NONE_VALUE);
   const [showColumnConfig, setShowColumnConfig] = useState(false);
+
+  // Column selection state — order file
+  const [orderPreview, setOrderPreview] = useState<OrderFilePreview | null>(null);
+  const [isOrderPreviewLoading, setIsOrderPreviewLoading] = useState(false);
+  const [selectedOrderNameCol, setSelectedOrderNameCol] = useState<string>("");
+  const [selectedOrderQtyCol, setSelectedOrderQtyCol] = useState<string>("");
+  const [selectedOrderArticleCol, setSelectedOrderArticleCol] = useState<string>(NONE_VALUE);
+  const [showOrderColumnConfig, setShowOrderColumnConfig] = useState(false);
 
   // Per-row overrides: index → override
   const [overrides, setOverrides] = useState<Map<number, Override>>(new Map());
@@ -146,21 +164,48 @@ export default function Home() {
     }
   }, []);
 
+  const loadOrderPreview = useCallback(async (file: File) => {
+    setIsOrderPreviewLoading(true);
+    setOrderPreview(null);
+    try {
+      const fd = new FormData();
+      fd.append("orderFile", file);
+      const res = await fetch("/api/match/preview-order", { method: "POST", body: fd });
+      if (!res.ok) throw new Error("preview failed");
+      const preview = await res.json() as OrderFilePreview;
+      setOrderPreview(preview);
+      setSelectedOrderNameCol(preview.detected.nameColumn ?? preview.columns[0] ?? "");
+      setSelectedOrderQtyCol(preview.detected.qtyColumn ?? "");
+      setSelectedOrderArticleCol(preview.detected.articleColumn ?? NONE_VALUE);
+    } catch {
+      setOrderPreview(null);
+    } finally {
+      setIsOrderPreviewLoading(false);
+    }
+  }, []);
+
   const handlePriceFileSelect = (file: File | null) => {
     setPriceFile(file);
     setPricePreview(null);
     setShowColumnConfig(false);
-    if (file) {
-      void loadPricePreview(file);
-    }
+    if (file) void loadPricePreview(file);
   };
 
-  // Auto-show column config when preview loaded and has columns
+  const handleOrderFileSelect = (file: File | null) => {
+    setOrderFile(file);
+    setOrderPreview(null);
+    setShowOrderColumnConfig(false);
+    if (file) void loadOrderPreview(file);
+  };
+
+  // Auto-show column config when previews loaded
   useEffect(() => {
-    if (pricePreview && pricePreview.columns.length > 0) {
-      setShowColumnConfig(true);
-    }
+    if (pricePreview && pricePreview.columns.length > 0) setShowColumnConfig(true);
   }, [pricePreview]);
+
+  useEffect(() => {
+    if (orderPreview && orderPreview.columns.length > 0) setShowOrderColumnConfig(true);
+  }, [orderPreview]);
 
   // ── SSE upload ─────────────────────────────────────────────────────────────
   const handleProcess = async () => {
@@ -187,6 +232,9 @@ export default function Home() {
       if (selectedNameCol) formData.append("nameColumn", selectedNameCol);
       if (selectedPriceCol) formData.append("priceColumn", selectedPriceCol);
       if (selectedArticleCol && selectedArticleCol !== NONE_VALUE) formData.append("articleColumn", selectedArticleCol);
+      if (selectedOrderNameCol) formData.append("orderNameColumn", selectedOrderNameCol);
+      if (selectedOrderQtyCol) formData.append("orderQtyColumn", selectedOrderQtyCol);
+      if (selectedOrderArticleCol && selectedOrderArticleCol !== NONE_VALUE) formData.append("orderArticleColumn", selectedOrderArticleCol);
 
       const res = await fetch("/api/match", { method: "POST", body: formData });
       if (!res.ok || !res.body) {
@@ -314,6 +362,8 @@ export default function Home() {
     setSearchResults(new Map()); setSearchLoading(new Map()); setEditingPrice(new Map());
     setPricePreview(null); setSelectedNameCol(""); setSelectedPriceCol("");
     setSelectedArticleCol(NONE_VALUE); setShowColumnConfig(false);
+    setOrderPreview(null); setSelectedOrderNameCol(""); setSelectedOrderQtyCol("");
+    setSelectedOrderArticleCol(NONE_VALUE); setShowOrderColumnConfig(false);
   };
 
   const progressPercent = progress && progress.total > 0 ? Math.round((progress.processed / progress.total) * 100) : null;
@@ -385,7 +435,7 @@ export default function Home() {
                   <SelectTrigger className="h-8 text-xs">
                     <SelectValue placeholder="Выберите колонку" />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent className="max-h-[210px] overflow-y-auto">
                     {cols.map((col) => (
                       <SelectItem key={col} value={col} className="text-xs">
                         <span className="font-medium">{col}</span>
@@ -403,7 +453,7 @@ export default function Home() {
                   <SelectTrigger className="h-8 text-xs">
                     <SelectValue placeholder="Выберите колонку" />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent className="max-h-[210px] overflow-y-auto">
                     {cols.map((col) => (
                       <SelectItem key={col} value={col} className="text-xs">
                         <span className="font-medium">{col}</span>
@@ -421,7 +471,7 @@ export default function Home() {
                   <SelectTrigger className="h-8 text-xs">
                     <SelectValue placeholder="Не выбрано" />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent className="max-h-[210px] overflow-y-auto">
                     <SelectItem value={NONE_VALUE} className="text-xs text-muted-foreground">Не выбрано</SelectItem>
                     {cols.map((col) => (
                       <SelectItem key={col} value={col} className="text-xs">
@@ -431,6 +481,113 @@ export default function Home() {
                   </SelectContent>
                 </Select>
                 {selectedArticleCol && selectedArticleCol !== NONE_VALUE && samplePreview(selectedArticleCol)}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ── Order file column selector UI ───────────────────────────────────────────
+  const OrderColumnSelector = () => {
+    if (!orderFile) return null;
+    if (isOrderPreviewLoading) {
+      return (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground mt-3 px-1">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          <span>Определяем колонки списка...</span>
+        </div>
+      );
+    }
+    if (!orderPreview || orderPreview.columns.length === 0) return null;
+
+    const cols = orderPreview.columns;
+    const samples = orderPreview.samples;
+
+    const samplePreview = (col: string) => {
+      const vals = samples[col] ?? [];
+      if (!vals.length) return null;
+      return <span className="text-muted-foreground/70 truncate max-w-[160px] block">{vals.slice(0, 2).join(", ")}</span>;
+    };
+
+    return (
+      <div className="mt-4 rounded-lg border border-border bg-muted/30">
+        <button
+          type="button"
+          onClick={() => setShowOrderColumnConfig((v) => !v)}
+          className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium hover:bg-muted/50 transition-colors rounded-lg"
+        >
+          <span className="flex items-center gap-2">
+            <span>Колонки списка товаров</span>
+            {selectedOrderNameCol && selectedOrderQtyCol && (
+              <Badge variant="outline" className="text-[11px] font-normal bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-400 dark:border-emerald-800">
+                {selectedOrderNameCol} / {selectedOrderQtyCol}
+              </Badge>
+            )}
+          </span>
+          <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${showOrderColumnConfig ? "rotate-180" : ""}`} />
+        </button>
+
+        {showOrderColumnConfig && (
+          <div className="px-4 pb-4 space-y-4 border-t border-border pt-4">
+            <p className="text-xs text-muted-foreground">
+              Укажите колонки с наименованием и количеством в вашем списке товаров.
+            </p>
+            <div className="grid gap-4 sm:grid-cols-3">
+              {/* Name column */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-foreground">Колонка с названием</label>
+                <Select value={selectedOrderNameCol} onValueChange={setSelectedOrderNameCol}>
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue placeholder="Выберите колонку" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-[210px] overflow-y-auto">
+                    {cols.map((col) => (
+                      <SelectItem key={col} value={col} className="text-xs">
+                        <span className="font-medium">{col}</span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {samplePreview(selectedOrderNameCol)}
+              </div>
+
+              {/* Qty column */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-foreground">Колонка с количеством</label>
+                <Select value={selectedOrderQtyCol} onValueChange={setSelectedOrderQtyCol}>
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue placeholder="Выберите колонку" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-[210px] overflow-y-auto">
+                    {cols.map((col) => (
+                      <SelectItem key={col} value={col} className="text-xs">
+                        <span className="font-medium">{col}</span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {samplePreview(selectedOrderQtyCol)}
+              </div>
+
+              {/* Article column (optional) */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-foreground">Артикул <span className="text-muted-foreground font-normal">(необязательно)</span></label>
+                <Select value={selectedOrderArticleCol} onValueChange={setSelectedOrderArticleCol}>
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue placeholder="Не выбрано" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-[210px] overflow-y-auto">
+                    <SelectItem value={NONE_VALUE} className="text-xs text-muted-foreground">Не выбрано</SelectItem>
+                    {cols.map((col) => (
+                      <SelectItem key={col} value={col} className="text-xs">
+                        <span className="font-medium">{col}</span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {selectedOrderArticleCol && selectedOrderArticleCol !== NONE_VALUE && samplePreview(selectedOrderArticleCol)}
               </div>
             </div>
           </div>
@@ -481,7 +638,10 @@ export default function Home() {
                   <Dropzone label="Прайс-лист" accept=".xlsx,.xls,.csv" file={priceFile} onFileSelect={handlePriceFileSelect} />
                   <ColumnSelector />
                 </div>
-                <Dropzone label="Список товаров" accept=".xlsx,.xls,.csv" file={orderFile} onFileSelect={setOrderFile} />
+                <div className="space-y-0">
+                  <Dropzone label="Список товаров" accept=".xlsx,.xls,.csv" file={orderFile} onFileSelect={handleOrderFileSelect} />
+                  <OrderColumnSelector />
+                </div>
               </div>
 
               {isProcessing && (
