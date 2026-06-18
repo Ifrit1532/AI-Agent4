@@ -122,6 +122,37 @@ export default function Home() {
   const [pendingCachedResult, setPendingCachedResult] = useState<RichMatchResult | null>(null);
   const skipCacheRef = useRef(false);
 
+  // Resizable columns
+  const DEFAULT_COL_WIDTHS = [220, 130, 210, 110, 70, 55, 125, 115, 115];
+  const [colWidths, setColWidths] = useState<number[]>(DEFAULT_COL_WIDTHS);
+  const resizingRef = useRef<{ colIdx: number; startX: number; startWidth: number } | null>(null);
+
+  const onResizeStart = useCallback((colIdx: number, e: React.MouseEvent) => {
+    e.preventDefault();
+    const startWidth = colWidths[colIdx] ?? DEFAULT_COL_WIDTHS[colIdx] ?? 100;
+    resizingRef.current = { colIdx, startX: e.clientX, startWidth };
+
+    const onMove = (ev: MouseEvent) => {
+      if (!resizingRef.current) return;
+      const diff = ev.clientX - resizingRef.current.startX;
+      const newWidth = Math.max(50, resizingRef.current.startWidth + diff);
+      setColWidths((prev) => {
+        const next = [...prev];
+        next[resizingRef.current!.colIdx] = newWidth;
+        return next;
+      });
+    };
+
+    const onUp = () => {
+      resizingRef.current = null;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [colWidths]);
+
   // Column selection state — price file
   const [pricePreview, setPricePreview] = useState<PriceFilePreview | null>(null);
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
@@ -745,18 +776,35 @@ export default function Home() {
 
             <Card className="border-border shadow-sm overflow-hidden">
               <div className="overflow-x-auto">
-                <Table>
+                <Table style={{ tableLayout: "fixed", width: colWidths.reduce((a, b) => a + b, 0) }}>
+                  <colgroup>
+                    {colWidths.map((w, i) => <col key={i} style={{ width: w }} />)}
+                  </colgroup>
                   <TableHeader className="bg-muted/50">
                     <TableRow>
-                      <TableHead className="font-medium text-muted-foreground min-w-[160px]">Наименование</TableHead>
-                      <TableHead className="w-[130px] font-medium text-muted-foreground">Арт. / Код</TableHead>
-                      <TableHead className="font-medium text-muted-foreground">Совпадение в прайсе</TableHead>
-                      <TableHead className="w-[110px] font-medium text-muted-foreground">Арт. прайса</TableHead>
-                      <TableHead className="text-right font-medium text-muted-foreground w-[65px]">Кол-во</TableHead>
-                      <TableHead className="font-medium text-muted-foreground w-[55px]">Ед.</TableHead>
-                      <TableHead className="text-right font-medium text-muted-foreground w-[120px]">Цена за ед.</TableHead>
-                      <TableHead className="text-right font-medium text-muted-foreground w-[110px]">Сумма</TableHead>
-                      <TableHead className="text-center font-medium text-muted-foreground w-[110px]">Статус</TableHead>
+                      {([
+                        { label: "Наименование", align: "left" },
+                        { label: "Арт. / Код", align: "left" },
+                        { label: "Совпадение в прайсе", align: "left" },
+                        { label: "Арт. прайса", align: "left" },
+                        { label: "Кол-во", align: "right" },
+                        { label: "Ед.", align: "left" },
+                        { label: "Цена за ед.", align: "right" },
+                        { label: "Сумма", align: "right" },
+                        { label: "Статус", align: "center" },
+                      ] as const).map(({ label, align }, i) => (
+                        <TableHead
+                          key={i}
+                          className={`font-medium text-muted-foreground select-none overflow-hidden relative ${align === "right" ? "text-right" : align === "center" ? "text-center" : ""}`}
+                          style={{ width: colWidths[i] }}
+                        >
+                          <span className="truncate block">{label}</span>
+                          <div
+                            className="absolute right-0 top-0 h-full w-[5px] cursor-col-resize hover:bg-primary/40 active:bg-primary/60 transition-colors z-10"
+                            onMouseDown={(e) => onResizeStart(i, e)}
+                          />
+                        </TableHead>
+                      ))}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -781,7 +829,7 @@ export default function Home() {
 
                       return (
                         <TableRow key={idx} className={rowBg}>
-                          <TableCell className="py-2 max-w-[220px]">
+                          <TableCell className="py-2 overflow-hidden">
                             <div className="truncate font-medium text-sm" title={item.name}>{item.name}</div>
                           </TableCell>
 
