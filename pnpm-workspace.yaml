@@ -75,12 +75,15 @@ onlyBuiltDependencies:
   - unrs-resolver
 
 # ============================================================================
-# BUILD SCRIPT PERMISSIONS (added to fix ERR_PNPM_IGNORED_BUILDS on Render)
+# BUILD SCRIPT PERMISSIONS (Решает проблему ERR_PNPM_IGNORED_BUILDS на Render)
 # ============================================================================
-# Disable strict build script checks to allow esbuild and other dependencies
-# to run their postinstall/build scripts (required for TypeScript compilation).
-strictDepBuilds: false
-dangerouslyAllowAllBuilds: true
+# Явно разрешаем выполнение скриптов сборки только для нужных пакетов.
+# Это безопаснее, чем глобальное отключение strictDepBuilds.
+allowBuilds:
+  esbuild: true
+  '@swc/core': true
+  msw: true
+  unrs-resolver: true
 
 # ============================================================================
 # OVERRIDES: Platform exclusions and dependency overrides
