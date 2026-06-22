@@ -74,6 +74,17 @@ onlyBuiltDependencies:
   - msw
   - unrs-resolver
 
+# ============================================================================
+# BUILD SCRIPT PERMISSIONS (added to fix ERR_PNPM_IGNORED_BUILDS on Render)
+# ============================================================================
+# Disable strict build script checks to allow esbuild and other dependencies
+# to run their postinstall/build scripts (required for TypeScript compilation).
+strictDepBuilds: false
+dangerouslyAllowAllBuilds: true
+
+# ============================================================================
+# OVERRIDES: Platform exclusions and dependency overrides
+# ============================================================================
 overrides:
   # replit uses linux-x64 only, we can exclude all other platforms
   "esbuild>@esbuild/darwin-arm64": "-"
@@ -158,6 +169,3 @@ overrides:
   # drizzle-kit uses esbuild internally on an older version that's vulnerable, this overrides it
   "@esbuild-kit/esm-loader": "npm:tsx@^4.21.0"
   esbuild: "0.27.3"
-
-  strictDepBuilds: false
-dangerouslyAllowAllBuilds: true
