@@ -416,6 +416,33 @@ function detectOrderColumns(
 }
 
 /**
+ * Read ALL rows from a sheet including hidden/collapsed rows.
+ * xlsx's sheet_to_json skips rows marked with hidden=true in !rows metadata.
+ * This helper iterates over the full decoded range cell-by-cell, bypassing that filter.
+ */
+function sheetToAllRows(sheet: XLSX.WorkSheet): (string | null)[][] {
+  const ref = sheet["!ref"];
+  if (!ref) return [];
+  const range = XLSX.utils.decode_range(ref);
+  const rows: (string | null)[][] = [];
+  for (let r = range.s.r; r <= range.e.r; r++) {
+    const row: (string | null)[] = [];
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      const cell = sheet[addr] as XLSX.CellObject | undefined;
+      if (!cell || cell.v == null) {
+        row.push(null);
+      } else {
+        // Prefer formatted string (w) — mirrors sheet_to_json raw:false behaviour
+        row.push(cell.w ?? String(cell.v));
+      }
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+/**
  * Parse a single worksheet with smart header-row detection (scans first 30 rows).
  * Returns extracted PriceItems for that sheet.
  */
@@ -423,11 +450,8 @@ function parseSheetItems(
   sheet: XLSX.WorkSheet,
   overrides?: PriceColumnOverrides,
 ): PriceItem[] {
-  const rawRows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
-    header: 1,
-    defval: null,
-    raw: false,
-  });
+  // Use our own row reader so hidden/collapsed rows are included
+  const rawRows = sheetToAllRows(sheet);
 
   if (rawRows.length < 2) return [];
 
