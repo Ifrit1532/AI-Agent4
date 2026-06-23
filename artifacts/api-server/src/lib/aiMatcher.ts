@@ -67,6 +67,29 @@ function keywords(s: string): string[] {
     .filter((w) => w.length >= 2);
 }
 
+/**
+ * Extra "joined" keywords to handle spacing differences in model codes.
+ * e.g. price list "АИР 80В6" → tokens ["аир","80в6"], joined → "аир80в6"
+ * so an order keyword "аир80в6" can still find it.
+ */
+function joinedPairKeywords(name: string): string[] {
+  const kws = keywords(name);
+  const out: string[] = [];
+  for (let i = 0; i < kws.length - 1; i++) {
+    const j = kws[i]! + kws[i + 1]!;
+    if (j.length >= 4 && j.length <= 30) out.push(j);
+  }
+  return out;
+}
+
+/**
+ * Split a compound Cyrillic+digit keyword at letter↔digit boundaries.
+ * "аир80в6" → ["аир","80в6"]   "80аир" → ["80","аир"]
+ */
+function splitCompoundKeyword(kw: string): string[] {
+  return kw.split(/(?<=[а-яёa-z])(?=\d)|(?<=\d)(?=[а-яёa-z])/);
+}
+
 // ─── Product code extraction ───────────────────────────────────────────────────
 
 export function extractProductCodes(name: string): string[] {
@@ -204,6 +227,12 @@ function buildPriceIndex(items: PriceItem[]): PriceItemIndex {
       if (!b) { b = []; byKeyword.set(kw, b); }
       b.push(i);
     }
+    // Also index joined adjacent-token pairs so "АИР 80В6" ↔ "АИР80В6" both match
+    for (const jk of joinedPairKeywords(item.name)) {
+      let b = byKeyword.get(jk);
+      if (!b) { b = []; byKeyword.set(jk, b); }
+      b.push(i);
+    }
   }
 
   return { items, byArticle, byCodeInName, byKeyword };
@@ -249,6 +278,26 @@ function findFromIndex(
       kwHits.set(idx, (kwHits.get(idx) ?? 0) + 1);
     }
   }
+
+  // 3b. Split-compound fallback: "аир80в6" not in index → try ["аир"]+["80в6"] intersection
+  // Handles price list "АИР 80В6" (spaces) vs order "АИР80В6" (no spaces)
+  for (const kw of orderKws) {
+    if (byKeyword.has(kw)) continue; // already hit
+    if (kw.length < 4) continue;
+    const parts = splitCompoundKeyword(kw).filter((p) => p.length >= 2);
+    if (parts.length < 2) continue;
+    const buckets = parts.map((p) => byKeyword.get(p));
+    if (buckets.some((b) => !b || b.length === 0)) continue;
+    // Intersection of all part buckets
+    let inter = new Set<number>(buckets[0]!.slice(0, KW_BUCKET_CAP));
+    for (let k = 1; k < buckets.length; k++) {
+      const s = new Set(buckets[k]!.slice(0, KW_BUCKET_CAP));
+      inter = new Set([...inter].filter((x) => s.has(x)));
+    }
+    // Weight intersection hits highly (compound match = strong signal)
+    for (const idx of inter) kwHits.set(idx, (kwHits.get(idx) ?? 0) + parts.length + 1);
+  }
+
   const kwTop = [...kwHits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 50);
   for (const [idx] of kwTop) candidateSet.add(idx);
 
@@ -315,6 +364,12 @@ function buildTaggedIndex(items1: PriceItem[], items2: PriceItem[]): TaggedPrice
       if (!b) { b = []; byKeyword.set(kw, b); }
       b.push(i);
     }
+    // Also index joined adjacent-token pairs so "АИР 80В6" ↔ "АИР80В6" both match
+    for (const jk of joinedPairKeywords(item.name)) {
+      let b = byKeyword.get(jk);
+      if (!b) { b = []; byKeyword.set(jk, b); }
+      b.push(i);
+    }
   }
 
   return { items: tagged, byArticle, byCodeInName, byKeyword };
@@ -354,6 +409,23 @@ function findDualFromIndex(
       kwHits.set(idx, (kwHits.get(idx) ?? 0) + 1);
     }
   }
+
+  // Split-compound fallback (same logic as findFromIndex)
+  for (const kw of orderKws) {
+    if (byKeyword.has(kw)) continue;
+    if (kw.length < 4) continue;
+    const parts = splitCompoundKeyword(kw).filter((p) => p.length >= 2);
+    if (parts.length < 2) continue;
+    const buckets = parts.map((p) => byKeyword.get(p));
+    if (buckets.some((b) => !b || b.length === 0)) continue;
+    let inter = new Set<number>(buckets[0]!.slice(0, KW_BUCKET_CAP));
+    for (let k = 1; k < buckets.length; k++) {
+      const s = new Set(buckets[k]!.slice(0, KW_BUCKET_CAP));
+      inter = new Set([...inter].filter((x) => s.has(x)));
+    }
+    for (const idx of inter) kwHits.set(idx, (kwHits.get(idx) ?? 0) + parts.length + 1);
+  }
+
   const kwTop = [...kwHits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 50);
   for (const [idx] of kwTop) candidateSet.add(idx);
 

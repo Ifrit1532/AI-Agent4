@@ -628,10 +628,14 @@ export function parsePriceList(
   const rawRows = allSheetsToRows(buffer);
   const currency = detectCurrency(rawRows);
 
-  // ── Raw cell scan: count cells containing "двигател" and hidden rows ──────────
+  // ── Raw cell scan: count cells containing motor-related text ─────────────────
   let rawMotorCells = 0;
   let rawHiddenRows = 0;
+  let rawAirCells = 0;     // electric-motor series "АИР"
+  let rawMtnCells = 0;     // electric-motor series "МТН"
+  let rawTotalCells = 0;
   const motorSamples: string[] = [];
+  const airSamples: string[] = [];
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
     if (!sheet) continue;
@@ -640,23 +644,29 @@ export function parsePriceList(
     for (const r of rowsMeta) {
       if (r?.hidden) rawHiddenRows++;
     }
-    // Scan every cell for motor-related text and electric motor series codes
+    // Scan every cell — NOTE: \b does NOT work for Cyrillic in JS; use .includes()
     for (const addr of Object.keys(sheet)) {
       if (addr.startsWith("!")) continue;
+      rawTotalCells++;
       const cell = sheet[addr] as { v?: unknown; w?: unknown } | undefined;
       const val = String(cell?.v ?? cell?.w ?? "").toLowerCase();
       if (val.includes("двигател") || val.includes("мотор")) {
         rawMotorCells++;
-        if (motorSamples.length < 10) motorSamples.push(String(cell?.v ?? ""));
+        if (motorSamples.length < 10) motorSamples.push(String(cell?.v ?? "").slice(0, 80));
       }
-      // Also check for electric motor series names (АИР, МТН, ADM, WD — typical series)
-      if (/\bаир\b|\bмтн\b|\badm\b|\bwd\d|\bвибромотор/i.test(val)) {
-        if (motorSamples.length < 10) motorSamples.push("SERIES:" + String(cell?.v ?? "").slice(0, 80));
+      // Electric motor series — use .includes(), NOT \b (broken for Cyrillic)
+      if (val.includes("аир")) {
+        rawAirCells++;
+        if (airSamples.length < 10) airSamples.push(String(cell?.v ?? "").slice(0, 80));
+      }
+      if (val.includes("мтн")) {
+        rawMtnCells++;
+        if (airSamples.length < 10) airSamples.push("МТН:" + String(cell?.v ?? "").slice(0, 80));
       }
     }
   }
   logger.info(
-    { rawMotorCells, rawHiddenRows, motorSamples },
+    { rawTotalCells, rawMotorCells, rawHiddenRows, rawAirCells, rawMtnCells, motorSamples, airSamples },
     "Raw cell scan — motors in file",
   );
 
