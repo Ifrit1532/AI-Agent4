@@ -417,29 +417,51 @@ function detectOrderColumns(
 
 /**
  * Read ALL rows from a sheet including hidden/collapsed rows.
+ *
  * xlsx's sheet_to_json skips rows marked with hidden=true in !rows metadata.
- * This helper iterates over the full decoded range cell-by-cell, bypassing that filter.
+ * Additionally, some xlsx files store collapsed row cells OUTSIDE the !ref bounding
+ * box, so iterating decode_range(!ref) also misses them.
+ *
+ * This helper builds the row matrix by enumerating every cell address in
+ * Object.keys(sheet), which is the only way to reach every cell regardless of
+ * visibility or !ref coverage.
  */
 function sheetToAllRows(sheet: XLSX.WorkSheet): (string | null)[][] {
-  const ref = sheet["!ref"];
-  if (!ref) return [];
-  const range = XLSX.utils.decode_range(ref);
-  const rows: (string | null)[][] = [];
-  for (let r = range.s.r; r <= range.e.r; r++) {
-    const row: (string | null)[] = [];
-    for (let c = range.s.c; c <= range.e.c; c++) {
-      const addr = XLSX.utils.encode_cell({ r, c });
-      const cell = sheet[addr] as XLSX.CellObject | undefined;
-      if (!cell || cell.v == null) {
-        row.push(null);
-      } else {
-        // Prefer formatted string (w) — mirrors sheet_to_json raw:false behaviour
-        row.push(cell.w ?? String(cell.v));
-      }
+  // Pass 1: collect all cell values grouped by row index
+  const rowMap = new Map<number, Map<number, string | null>>();
+  let maxCol = 0;
+
+  for (const addr of Object.keys(sheet)) {
+    if (addr.startsWith("!")) continue;
+    const pos = XLSX.utils.decode_cell(addr);
+    const cell = sheet[addr] as XLSX.CellObject | undefined;
+    const val = !cell || cell.v == null ? null : (cell.w ?? String(cell.v));
+
+    let colMap = rowMap.get(pos.r);
+    if (!colMap) {
+      colMap = new Map();
+      rowMap.set(pos.r, colMap);
     }
-    rows.push(row);
+    colMap.set(pos.c, val);
+    if (pos.c > maxCol) maxCol = pos.c;
   }
-  return rows;
+
+  if (rowMap.size === 0) return [];
+
+  // Pass 2: emit rows in ascending order, padding missing columns with null
+  const sortedRowIdxs = Array.from(rowMap.keys()).sort((a, b) => a - b);
+  const result: (string | null)[][] = [];
+
+  for (const ri of sortedRowIdxs) {
+    const colMap = rowMap.get(ri)!;
+    const row: (string | null)[] = new Array(maxCol + 1).fill(null);
+    for (const [ci, val] of colMap) {
+      row[ci] = val;
+    }
+    result.push(row);
+  }
+
+  return result;
 }
 
 /**
@@ -618,7 +640,7 @@ export function parsePriceList(
     for (const r of rowsMeta) {
       if (r?.hidden) rawHiddenRows++;
     }
-    // Scan every cell for motor-related text
+    // Scan every cell for motor-related text and electric motor series codes
     for (const addr of Object.keys(sheet)) {
       if (addr.startsWith("!")) continue;
       const cell = sheet[addr] as { v?: unknown; w?: unknown } | undefined;
@@ -626,6 +648,10 @@ export function parsePriceList(
       if (val.includes("двигател") || val.includes("мотор")) {
         rawMotorCells++;
         if (motorSamples.length < 10) motorSamples.push(String(cell?.v ?? ""));
+      }
+      // Also check for electric motor series names (АИР, МТН, ADM, WD — typical series)
+      if (/\bаир\b|\bмтн\b|\badm\b|\bwd\d|\bвибромотор/i.test(val)) {
+        if (motorSamples.length < 10) motorSamples.push("SERIES:" + String(cell?.v ?? "").slice(0, 80));
       }
     }
   }
