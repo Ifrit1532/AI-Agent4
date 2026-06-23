@@ -1,5 +1,6 @@
 import XLSX from "xlsx";
 import type { OrderItem, PriceItem } from "./aiMatcher";
+import { logger } from "./logger";
 
 function normalizeHeader(h: unknown): string {
   return String(h ?? "").toLowerCase().trim();
@@ -414,6 +415,148 @@ function detectOrderColumns(
   return { nameColumn, qtyColumn, articleColumn };
 }
 
+/**
+ * Parse a single worksheet with smart header-row detection (scans first 30 rows).
+ * Returns extracted PriceItems for that sheet.
+ */
+function parseSheetItems(
+  sheet: XLSX.WorkSheet,
+  overrides?: PriceColumnOverrides,
+): PriceItem[] {
+  const rawRows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+    header: 1,
+    defval: null,
+    raw: false,
+  });
+
+  if (rawRows.length < 2) return [];
+
+  // Score each of the first 30 rows to find the best header row
+  let bestScore = -Infinity;
+  let bestIdx = 0;
+
+  for (let i = 0; i < Math.min(rawRows.length, 30); i++) {
+    const row = rawRows[i] ?? [];
+    const cells = (row as unknown[]).map((c) => String(c ?? "").trim());
+    const nonEmpty = cells.filter((v) => v.length > 0);
+    if (nonEmpty.length < 2) continue;
+
+    let score = 0;
+    let textCells = 0;
+    for (const cell of nonEmpty) {
+      const h = normalizeHeader(cell);
+      if (isNameHeader(h)) score += 6;
+      else if (isPriceHeader(h)) score += 6;
+      else if (isArticleHeader(h)) score += 5;
+      else if (isUnitHeader(h)) score += 4;
+      else if (!isNumeric(cell) && cell.length <= 50) { score += 0.5; textCells++; }
+    }
+    if (textCells >= 3) score += 3;
+    if (nonEmpty.every((c) => isNumeric(c))) score -= 20;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = i;
+    }
+  }
+
+  // Build column map from best header row
+  const headerRow = (rawRows[bestIdx] ?? []) as unknown[];
+  const seen = new Set<string>();
+  const columns: string[] = [];
+  const colMap = new Map<number, string>();
+
+  for (let ci = 0; ci < headerRow.length; ci++) {
+    const hasData = rawRows
+      .slice(bestIdx + 1, bestIdx + 16)
+      .some((r) => String(((r as unknown[])[ci]) ?? "").trim().length > 0);
+    const headerVal = String(headerRow[ci] ?? "").trim();
+    if (!hasData && headerVal.length === 0) continue;
+    let name = headerVal.length > 0 ? headerVal : `Колонка${ci + 1}`;
+    if (seen.has(name)) {
+      let s = 2;
+      while (seen.has(`${name}_${s}`)) s++;
+      name = `${name}_${s}`;
+    }
+    seen.add(name);
+    columns.push(name);
+    colMap.set(ci, name);
+  }
+
+  const rows: Record<string, unknown>[] = [];
+  for (let ri = bestIdx + 1; ri < rawRows.length; ri++) {
+    const rawRow = (rawRows[ri] ?? []) as unknown[];
+    const hasAny = rawRow.some((c) => String(c ?? "").trim().length > 0);
+    if (!hasAny) continue;
+    const row: Record<string, unknown> = {};
+    for (const [ci, colName] of colMap) {
+      row[colName] = rawRow[ci] ?? null;
+    }
+    rows.push(row);
+  }
+
+  if (rows.length === 0) return [];
+
+  // Detect name/price/article columns
+  let nameKey = overrides?.nameColumn ?? "";
+  let priceKey = overrides?.priceColumn ?? "";
+  let articleKey = overrides?.articleColumn ?? "";
+  let unitKey = "";
+
+  for (const col of columns) {
+    const h = normalizeHeader(col);
+    if (!articleKey && isArticleHeader(h)) articleKey = col;
+    if (!nameKey && isNameHeader(h)) nameKey = col;
+    if (!priceKey && isPriceHeader(h)) priceKey = col;
+    if (!unitKey && isUnitHeader(h)) unitKey = col;
+  }
+
+  // Data-driven fallback when header keywords didn't match
+  if (!priceKey || !nameKey) {
+    const stats = analyzeColumnStats(rows, columns);
+    if (!priceKey) {
+      const cands = columns
+        .filter((c) => c !== nameKey && c !== articleKey)
+        .filter((c) => (stats[c]?.numericRatio ?? 0) > 0.6)
+        .sort((a, b) => (stats[b]?.maxNum ?? 0) - (stats[a]?.maxNum ?? 0));
+      if (cands.length) priceKey = cands[0]!;
+    }
+    if (!nameKey) {
+      const cands = columns
+        .filter((c) => c !== priceKey && c !== articleKey)
+        .filter((c) => (stats[c]?.textRatio ?? 0) > 0.4)
+        .sort((a, b) => (stats[b]?.avgLen ?? 0) - (stats[a]?.avgLen ?? 0));
+      if (cands.length) nameKey = cands[0]!;
+    }
+    if (!articleKey) {
+      const cands = columns
+        .filter((c) => c !== nameKey && c !== priceKey)
+        .filter((c) => (stats[c]?.articleRatio ?? 0) > 0.25);
+      if (cands.length) articleKey = cands[0]!;
+    }
+  }
+
+  if (!nameKey && columns.length > 0) nameKey = columns[0]!;
+  if (!nameKey || !priceKey) return [];
+
+  const items: PriceItem[] = [];
+  for (const row of rows) {
+    const nameVal = String(row[nameKey] ?? "").trim();
+    const priceVal = row[priceKey];
+    if (!nameVal || !priceVal || !isNumeric(priceVal)) continue;
+    if (nameVal.toLowerCase() === normalizeHeader(nameKey)) continue;
+    const articleVal = articleKey ? String(row[articleKey] ?? "").trim() || null : null;
+    items.push({
+      name: nameVal,
+      price: toNumber(priceVal),
+      unit: unitKey ? String(row[unitKey] ?? "").trim() || null : null,
+      article: articleVal,
+    });
+  }
+
+  return items;
+}
+
 export function previewPriceFile(buffer: Buffer): PriceFilePreview {
   const { columns, rows } = buildColumnsAndRows(buffer, true);
   const samples = collectSamples(rows, columns);
@@ -432,88 +575,38 @@ export function parsePriceList(
   buffer: Buffer,
   overrides?: PriceColumnOverrides,
 ): { items: PriceItem[]; currency: string } {
-  // Read ALL sheets so grouped/collapsed sections are included
-  const rows = allSheetsToRows(buffer);
-  const currency = detectCurrency(rows);
+  const workbook = XLSX.read(buffer, { type: "buffer" });
 
-  const items: PriceItem[] = [];
+  // Currency detection from raw combined text
+  const rawRows = allSheetsToRows(buffer);
+  const currency = detectCurrency(rawRows);
 
-  // Detect column layout from the first row that has meaningful headers
-  let nameKey = overrides?.nameColumn ?? "";
-  let priceKey = overrides?.priceColumn ?? "";
-  let unitKey = "";
-  let articleKey = overrides?.articleColumn ?? "";
+  const allItems: PriceItem[] = [];
 
-  // First pass: detect columns from headers (skip if overridden)
-  if (!nameKey || !priceKey) {
-    for (const row of rows) {
-      const keys = Object.keys(row);
-      let foundHeaders = false;
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) continue;
+    const sheetItems = parseSheetItems(sheet, overrides);
+    logger.info({ sheetName, itemCount: sheetItems.length }, "Parsed price sheet");
+    allItems.push(...sheetItems);
+  }
 
-      for (const key of keys) {
-        const h = normalizeHeader(key);
-        if (!articleKey && isArticleHeader(h)) { articleKey = key; foundHeaders = true; }
-        if (!nameKey && isNameHeader(h)) { nameKey = key; foundHeaders = true; }
-        if (!priceKey && isPriceHeader(h)) { priceKey = key; foundHeaders = true; }
-        if (!unitKey && isUnitHeader(h)) { unitKey = key; foundHeaders = true; }
-      }
-
-      if (foundHeaders && (nameKey || priceKey)) break;
-    }
-  } else {
-    // Still detect unit & article from headers if not overridden
-    for (const row of rows) {
-      const keys = Object.keys(row);
-      for (const key of keys) {
-        const h = normalizeHeader(key);
-        if (!unitKey && isUnitHeader(h)) unitKey = key;
-        if (!articleKey && isArticleHeader(h)) articleKey = key;
-      }
-      if (unitKey) break;
+  // Deduplicate by name+price to avoid counting items from overlapping sheets twice
+  const seenKeys = new Set<string>();
+  const deduped: PriceItem[] = [];
+  for (const item of allItems) {
+    const key = `${item.name.toLowerCase()}|||${item.price}`;
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key);
+      deduped.push(item);
     }
   }
 
-  // Second pass: extract item rows
-  for (const row of rows) {
-    const keys = Object.keys(row);
-    if (keys.length < 2) continue;
-
-    // Per-row fallback detection if global detection found nothing
-    let localNameKey = nameKey;
-    let localPriceKey = priceKey;
-    let localUnitKey = unitKey;
-    let localArticleKey = articleKey;
-
-    if (!localNameKey) localNameKey = keys[0];
-    if (!localPriceKey) {
-      for (const key of keys) {
-        if (key !== localNameKey && isNumeric(row[key])) {
-          localPriceKey = key;
-          break;
-        }
-      }
-    }
-
-    const nameVal = String(row[localNameKey] ?? "").trim();
-    const priceVal = row[localPriceKey];
-
-    if (!nameVal || !priceVal || !isNumeric(priceVal)) continue;
-    // Skip rows that look like headers themselves
-    if (nameVal.toLowerCase() === normalizeHeader(localNameKey)) continue;
-
-    const articleVal = localArticleKey
-      ? String(row[localArticleKey] ?? "").trim() || null
-      : null;
-
-    items.push({
-      name: nameVal,
-      price: toNumber(priceVal),
-      unit: localUnitKey ? String(row[localUnitKey] ?? "").trim() || null : null,
-      article: articleVal,
-    });
-  }
-
-  return { items, currency };
+  logger.info(
+    { totalItems: deduped.length, sheetCount: workbook.SheetNames.length },
+    "Price list parsed (all sheets)",
+  );
+  return { items: deduped, currency };
 }
 
 export function parseOrderList(buffer: Buffer, overrides?: OrderColumnOverrides): OrderItem[] {

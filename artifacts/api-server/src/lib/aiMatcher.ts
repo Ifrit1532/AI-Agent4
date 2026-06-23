@@ -51,6 +51,7 @@ export interface MatchResult {
 function normalize(s: string): string {
   return s
     .toLowerCase()
+    .replace(/(\d)[,.](\d)/g, "$1$2")
     .replace(/[^\wа-яёa-z0-9\s]/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -63,7 +64,7 @@ function normalizeCode(a: string): string {
 function keywords(s: string): string[] {
   return normalize(s)
     .split(" ")
-    .filter((w) => w.length > 2);
+    .filter((w) => w.length >= 2);
 }
 
 // ─── Product code extraction ───────────────────────────────────────────────────
@@ -636,6 +637,26 @@ export async function matchPricesSSE(
     onProgress(i + 1, batches.length, BATCH_SIZE);
     const matched = await matchBatch(batches[i]!, currency);
     allMatched.push(...matched);
+  }
+
+  // Log not-found items with their top candidates so we can diagnose misses
+  const batchedByName = new Map(
+    batchedItems.map((b) => [b.orderItem.name.trim().toLowerCase(), b])
+  );
+  for (const item of allMatched.filter((i) => !i.found).slice(0, 15)) {
+    const batched = batchedByName.get(item.name.trim().toLowerCase());
+    logger.warn(
+      {
+        orderName: item.name,
+        candidateCount: batched?.candidates.length ?? 0,
+        topCandidates: batched?.candidates.slice(0, 5).map((c) => ({
+          name: c.name,
+          article: c.article,
+          price: c.price,
+        })),
+      },
+      "Not found — top candidates shown",
+    );
   }
 
   const grandTotal = allMatched.reduce((sum, item) => sum + (item.totalPrice ?? 0), 0);
