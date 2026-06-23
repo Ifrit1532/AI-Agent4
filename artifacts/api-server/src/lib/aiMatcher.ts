@@ -209,12 +209,12 @@ function buildPriceIndex(items: PriceItem[]): PriceItemIndex {
 }
 
 // Per-keyword bucket cap: avoids O(N) on very common words like "картридж"
-const KW_BUCKET_CAP = 300;
+const KW_BUCKET_CAP = 1500;
 
 function findFromIndex(
   orderItem: OrderItem,
   index: PriceItemIndex,
-  topN = 12,
+  topN = 20,
 ): { candidates: PriceItem[]; extractedCodes: string[] } {
   const extractedCodes = extractProductCodes(orderItem.name);
   const { items, byArticle, byCodeInName, byKeyword } = index;
@@ -322,7 +322,7 @@ function buildTaggedIndex(items1: PriceItem[], items2: PriceItem[]): TaggedPrice
 function findDualFromIndex(
   orderItem: OrderItem,
   index: TaggedPriceItemIndex,
-  topN = 12,
+  topN = 20,
 ): { candidates: TaggedPriceItem[]; extractedCodes: string[] } {
   const extractedCodes = extractProductCodes(orderItem.name);
   const { items, byArticle, byCodeInName, byKeyword } = index;
@@ -447,7 +447,43 @@ ${candidateList}`;
     throw new Error(`AI did not return a valid JSON array. Snippet: ${content.slice(0, 200)}`);
   }
 
-  return JSON.parse(jsonMatch[0]) as MatchedItem[];
+  const parsed = JSON.parse(jsonMatch[0]) as MatchedItem[];
+
+  // Realign by name in case AI reordered or dropped items
+  const byName = new Map<string, MatchedItem>();
+  for (const item of parsed) {
+    if (item.name) byName.set(item.name.trim().toLowerCase(), item);
+  }
+
+  const aligned: MatchedItem[] = batchItems.map((b) => {
+    const key = b.orderItem.name.trim().toLowerCase();
+    const found = byName.get(key);
+    if (found) return found;
+    // Fuzzy fallback: try partial match
+    for (const [k, v] of byName) {
+      if (k.includes(key.slice(0, 20)) || key.includes(k.slice(0, 20))) return v;
+    }
+    logger.warn({ orderName: b.orderItem.name }, "AI did not return result for item — marking not found");
+    return {
+      name: b.orderItem.name,
+      article: b.orderItem.article ?? null,
+      extractedCodes: b.extractedCodes,
+      quantity: b.orderItem.quantity,
+      unit: b.orderItem.unit ?? null,
+      unitPrice: null,
+      totalPrice: null,
+      found: false,
+      matchMethod: "none",
+      matchedName: null,
+      matchedArticle: null,
+    };
+  });
+
+  if (parsed.length !== batchItems.length) {
+    logger.warn({ expected: batchItems.length, got: parsed.length }, "AI returned wrong number of items in batch");
+  }
+
+  return aligned;
 }
 
 interface BatchOrderItemDual {
@@ -523,7 +559,41 @@ ${candidateList}`;
     throw new Error(`AI did not return a valid JSON array. Snippet: ${content.slice(0, 200)}`);
   }
 
-  return JSON.parse(jsonMatch[0]) as MatchedItem[];
+  const parsed = JSON.parse(jsonMatch[0]) as MatchedItem[];
+
+  const byName = new Map<string, MatchedItem>();
+  for (const item of parsed) {
+    if (item.name) byName.set(item.name.trim().toLowerCase(), item);
+  }
+
+  const aligned: MatchedItem[] = batchItems.map((b) => {
+    const key = b.orderItem.name.trim().toLowerCase();
+    const found = byName.get(key);
+    if (found) return found;
+    for (const [k, v] of byName) {
+      if (k.includes(key.slice(0, 20)) || key.includes(k.slice(0, 20))) return v;
+    }
+    logger.warn({ orderName: b.orderItem.name }, "AI (dual) did not return result for item — marking not found");
+    return {
+      name: b.orderItem.name,
+      article: b.orderItem.article ?? null,
+      extractedCodes: b.extractedCodes,
+      quantity: b.orderItem.quantity,
+      unit: b.orderItem.unit ?? null,
+      unitPrice: null,
+      totalPrice: null,
+      found: false,
+      matchMethod: "none",
+      matchedName: null,
+      matchedArticle: null,
+    };
+  });
+
+  if (parsed.length !== batchItems.length) {
+    logger.warn({ expected: batchItems.length, got: parsed.length }, "AI (dual) returned wrong number of items in batch");
+  }
+
+  return aligned;
 }
 
 // ─── Main entry points ─────────────────────────────────────────────────────────
@@ -545,7 +615,10 @@ export async function matchPricesSSE(
   const index = buildPriceIndex(priceItems);
 
   const batchedItems: BatchOrderItem[] = orderItems.map((orderItem) => {
-    const { candidates, extractedCodes } = findFromIndex(orderItem, index, 12);
+    const { candidates, extractedCodes } = findFromIndex(orderItem, index, 20);
+    if (candidates.length === 0) {
+      logger.warn({ orderName: orderItem.name, article: orderItem.article }, "Zero candidates found for order item");
+    }
     return { orderItem, candidates, extractedCodes };
   });
 
@@ -591,7 +664,10 @@ export async function matchPricesSSEDual(
   const index = buildTaggedIndex(priceItems1, priceItems2);
 
   const batchedItems: BatchOrderItemDual[] = orderItems.map((orderItem) => {
-    const { candidates, extractedCodes } = findDualFromIndex(orderItem, index, 12);
+    const { candidates, extractedCodes } = findDualFromIndex(orderItem, index, 20);
+    if (candidates.length === 0) {
+      logger.warn({ orderName: orderItem.name, article: orderItem.article }, "Zero candidates found for order item (dual)");
+    }
     return { orderItem, candidates, extractedCodes };
   });
 
