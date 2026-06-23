@@ -655,13 +655,23 @@ export function parsePriceList(
         if (motorSamples.length < 10) motorSamples.push(String(cell?.v ?? "").slice(0, 80));
       }
       // Electric motor series — use .includes(), NOT \b (broken for Cyrillic)
-      if (val.includes("аир")) {
-        rawAirCells++;
-        if (airSamples.length < 10) airSamples.push(String(cell?.v ?? "").slice(0, 80));
-      }
-      if (val.includes("мтн")) {
-        rawMtnCells++;
-        if (airSamples.length < 10) airSamples.push("МТН:" + String(cell?.v ?? "").slice(0, 80));
+      if (val.includes("аир") || val.includes("мтн")) {
+        if (val.includes("аир")) rawAirCells++;
+        if (val.includes("мтн")) rawMtnCells++;
+        // Capture the full row context for the first 5 АИР/МТН hits
+        if (airSamples.length < 5) {
+          const pos = XLSX.utils.decode_cell(addr);
+          // Grab all cells in the same row
+          const rowCells: Record<string, string> = {};
+          for (let c = 0; c <= 10; c++) {
+            const neighborAddr = XLSX.utils.encode_cell({ r: pos.r, c });
+            const neighborCell = sheet[neighborAddr] as { v?: unknown; w?: unknown } | undefined;
+            if (neighborCell?.v != null) {
+              rowCells[`col${c}`] = String(neighborCell.v ?? "").slice(0, 40);
+            }
+          }
+          airSamples.push(JSON.stringify({ sheet: sheetName, row: pos.r, ...rowCells }));
+        }
       }
     }
   }
