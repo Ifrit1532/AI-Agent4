@@ -575,17 +575,47 @@ export function parsePriceList(
   buffer: Buffer,
   overrides?: PriceColumnOverrides,
 ): { items: PriceItem[]; currency: string } {
-  const workbook = XLSX.read(buffer, { type: "buffer" });
+  // Read with cellStyles so xlsx also captures !rows[n].hidden flags
+  const workbook = XLSX.read(buffer, { type: "buffer", cellStyles: true, WTF: false });
 
   // Currency detection from raw combined text
   const rawRows = allSheetsToRows(buffer);
   const currency = detectCurrency(rawRows);
+
+  // ── Raw cell scan: count cells containing "двигател" and hidden rows ──────────
+  let rawMotorCells = 0;
+  let rawHiddenRows = 0;
+  const motorSamples: string[] = [];
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) continue;
+    // Count hidden rows via !rows metadata
+    const rowsMeta = (sheet["!rows"] ?? []) as Array<{ hidden?: boolean } | null | undefined>;
+    for (const r of rowsMeta) {
+      if (r?.hidden) rawHiddenRows++;
+    }
+    // Scan every cell for motor-related text
+    for (const addr of Object.keys(sheet)) {
+      if (addr.startsWith("!")) continue;
+      const cell = sheet[addr] as { v?: unknown; w?: unknown } | undefined;
+      const val = String(cell?.v ?? cell?.w ?? "").toLowerCase();
+      if (val.includes("двигател") || val.includes("мотор")) {
+        rawMotorCells++;
+        if (motorSamples.length < 10) motorSamples.push(String(cell?.v ?? ""));
+      }
+    }
+  }
+  logger.info(
+    { rawMotorCells, rawHiddenRows, motorSamples },
+    "Raw cell scan — motors in file",
+  );
 
   const allItems: PriceItem[] = [];
 
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
     if (!sheet) continue;
+    // Parse with hidden-row-aware range walking
     const sheetItems = parseSheetItems(sheet, overrides);
     logger.info({ sheetName, itemCount: sheetItems.length }, "Parsed price sheet");
     allItems.push(...sheetItems);
@@ -602,8 +632,17 @@ export function parsePriceList(
     }
   }
 
+  // How many parsed items contain motor keywords?
+  const parsedMotorItems = deduped.filter(
+    (i) => i.name.toLowerCase().includes("двигател") || i.name.toLowerCase().includes("мотор"),
+  );
   logger.info(
-    { totalItems: deduped.length, sheetCount: workbook.SheetNames.length },
+    {
+      totalItems: deduped.length,
+      sheetCount: workbook.SheetNames.length,
+      parsedMotorItems: parsedMotorItems.length,
+      parsedMotorSamples: parsedMotorItems.slice(0, 5).map((i) => i.name),
+    },
     "Price list parsed (all sheets)",
   );
   return { items: deduped, currency };
