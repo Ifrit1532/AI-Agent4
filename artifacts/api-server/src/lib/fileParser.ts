@@ -529,16 +529,18 @@ function parseSheetItems(
     colMap.set(ci, name);
   }
 
-  const rows: Record<string, unknown>[] = [];
+  // Keep rawRow alongside each record so the fallback parser can access all columns,
+  // even columns beyond colMap (sections with different layout, e.g. motor sub-section).
+  const rows: Array<{ rec: Record<string, unknown>; raw: (string | null)[] }> = [];
   for (let ri = bestIdx + 1; ri < rawRows.length; ri++) {
-    const rawRow = (rawRows[ri] ?? []) as unknown[];
-    const hasAny = rawRow.some((c) => String(c ?? "").trim().length > 0);
+    const rawRow = rawRows[ri]!;
+    const hasAny = (rawRow as unknown[]).some((c) => String(c ?? "").trim().length > 0);
     if (!hasAny) continue;
-    const row: Record<string, unknown> = {};
+    const rec: Record<string, unknown> = {};
     for (const [ci, colName] of colMap) {
-      row[colName] = rawRow[ci] ?? null;
+      rec[colName] = rawRow[ci] ?? null;
     }
-    rows.push(row);
+    rows.push({ rec, raw: rawRow });
   }
 
   if (rows.length === 0) return [];
@@ -549,6 +551,7 @@ function parseSheetItems(
   let articleKey = overrides?.articleColumn ?? "";
   let unitKey = "";
 
+  const recRows = rows.map((r) => r.rec);
   for (const col of columns) {
     const h = normalizeHeader(col);
     if (!articleKey && isArticleHeader(h)) articleKey = col;
@@ -559,7 +562,7 @@ function parseSheetItems(
 
   // Data-driven fallback when header keywords didn't match
   if (!priceKey || !nameKey) {
-    const stats = analyzeColumnStats(rows, columns);
+    const stats = analyzeColumnStats(recRows, columns);
     if (!priceKey) {
       const cands = columns
         .filter((c) => c !== nameKey && c !== articleKey)
@@ -586,10 +589,33 @@ function parseSheetItems(
   if (!nameKey || !priceKey) return [];
 
   const items: PriceItem[] = [];
-  for (const row of rows) {
+  for (const { rec: row, raw: rawRow } of rows) {
     const nameVal = String(row[nameKey] ?? "").trim();
     const priceVal = row[priceKey];
-    if (!nameVal || !priceVal || !isNumeric(priceVal)) continue;
+    if (!nameVal || !priceVal || !isNumeric(priceVal)) {
+      // Fallback for rows whose data lives in columns beyond the detected colMap
+      // (e.g. a motor sub-section where name=col4, price=col5 but primary map ends at col2).
+      // Strategy: longest non-numeric cell ≥15 chars → name; first numeric in [50, 5M] → price.
+      let fbName = "";
+      let fbPrice = 0;
+      for (const v of rawRow) {
+        if (!v) continue;
+        const s = v.trim();
+        if (s.length >= 15 && !isNumeric(s) && s.length > fbName.length) fbName = s;
+      }
+      for (const v of rawRow) {
+        if (!v || fbPrice) continue;
+        const s = v.trim();
+        if (isNumeric(s)) {
+          const n = toNumber(s);
+          if (n >= 50 && n <= 5_000_000) { fbPrice = n; }
+        }
+      }
+      if (fbName && fbPrice && fbName.toLowerCase() !== normalizeHeader(nameKey)) {
+        items.push({ name: fbName, price: fbPrice, article: null, unit: null });
+      }
+      continue;
+    }
     if (nameVal.toLowerCase() === normalizeHeader(nameKey)) continue;
     const articleVal = articleKey ? String(row[articleKey] ?? "").trim() || null : null;
     items.push({
