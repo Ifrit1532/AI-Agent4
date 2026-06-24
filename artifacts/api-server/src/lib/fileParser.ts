@@ -545,6 +545,11 @@ function parseSheetItems(
 
   if (rows.length === 0) return [];
 
+  logger.info(
+    { bestIdx, bestScore, colCount: columns.length, rowCount: rows.length, columns: columns.slice(0, 8) },
+    "parseSheetItems — header detected",
+  );
+
   // Detect name/price/article columns
   let nameKey = overrides?.nameColumn ?? "";
   let priceKey = overrides?.priceColumn ?? "";
@@ -576,6 +581,19 @@ function parseSheetItems(
       const cands = columns
         .filter((c) => c !== priceKey && c !== articleKey)
         .filter((c) => (stats[c]?.textRatio ?? 0) > 0.4)
+        // Exclude URL-like columns (column name itself starts with http/www,
+        // OR most values in the column are URLs)
+        .filter((c) => {
+          const cLower = c.toLowerCase();
+          if (cLower.startsWith("http") || cLower.startsWith("www.")) return false;
+          // Also check actual cell values: if >50% start with "http" → skip
+          const vals = rows.slice(0, 50).map((r) => String(r.rec[c] ?? "").trim()).filter(Boolean);
+          const urlCount = vals.filter((v) => v.toLowerCase().startsWith("http") || v.toLowerCase().startsWith("www.")).length;
+          if (vals.length > 0 && urlCount / vals.length > 0.5) return false;
+          return true;
+        })
+        // Exclude trivially short text columns (avg < 6 chars — likely codes/flags, not names)
+        .filter((c) => (stats[c]?.avgLen ?? 0) >= 6)
         .sort((a, b) => (stats[b]?.avgLen ?? 0) - (stats[a]?.avgLen ?? 0));
       if (cands.length) nameKey = cands[0]!;
     }
@@ -588,10 +606,15 @@ function parseSheetItems(
   }
 
   if (!nameKey && columns.length > 0) nameKey = columns[0]!;
+  logger.info(
+    { nameKey: nameKey.slice(0, 40), priceKey: priceKey.slice(0, 20), articleKey: articleKey.slice(0, 20) },
+    "parseSheetItems — keys detected",
+  );
   // Allow missing priceKey — the per-row fallback will scan raw cells for a price-like number.
   if (!nameKey) return [];
 
   const items: PriceItem[] = [];
+  let dbgMain = 0, dbgFbAdded = 0, dbgFbSkip = 0, dbgMainSkip = 0;
   for (const { rec: row, raw: rawRow } of rows) {
     const nameVal = String(row[nameKey] ?? "").trim();
     const priceVal = row[priceKey];
@@ -616,10 +639,13 @@ function parseSheetItems(
       }
       if (fbName && fbPrice && fbName.toLowerCase() !== normalizeHeader(nameKey)) {
         items.push({ name: fbName, price: fbPrice, article: null, unit: null });
+        dbgFbAdded++;
+      } else {
+        dbgFbSkip++;
       }
       continue;
     }
-    if (nameVal.toLowerCase() === normalizeHeader(nameKey)) continue;
+    if (nameVal.toLowerCase() === normalizeHeader(nameKey)) { dbgMainSkip++; continue; }
     const articleVal = articleKey ? String(row[articleKey] ?? "").trim() || null : null;
     items.push({
       name: nameVal,
@@ -627,8 +653,12 @@ function parseSheetItems(
       unit: unitKey ? String(row[unitKey] ?? "").trim() || null : null,
       article: articleVal,
     });
+    dbgMain++;
   }
-
+  logger.info(
+    { totalRows: rows.length, mainAdded: dbgMain, fbAdded: dbgFbAdded, fbSkip: dbgFbSkip, mainSkip: dbgMainSkip, items: items.length },
+    "parseSheetItems — loop done",
+  );
   return items;
 }
 
