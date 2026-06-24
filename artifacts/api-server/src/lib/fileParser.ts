@@ -567,6 +567,8 @@ function parseSheetItems(
       const cands = columns
         .filter((c) => c !== nameKey && c !== articleKey)
         .filter((c) => (stats[c]?.numericRatio ?? 0) > 0.6)
+        // Exclude columns whose max value > 1 000 000 — those are article/ID columns, not prices
+        .filter((c) => (stats[c]?.maxNum ?? 0) <= 1_000_000)
         .sort((a, b) => (stats[b]?.maxNum ?? 0) - (stats[a]?.maxNum ?? 0));
       if (cands.length) priceKey = cands[0]!;
     }
@@ -586,7 +588,8 @@ function parseSheetItems(
   }
 
   if (!nameKey && columns.length > 0) nameKey = columns[0]!;
-  if (!nameKey || !priceKey) return [];
+  // Allow missing priceKey — the per-row fallback will scan raw cells for a price-like number.
+  if (!nameKey) return [];
 
   const items: PriceItem[] = [];
   for (const { rec: row, raw: rawRow } of rows) {
