@@ -6,13 +6,20 @@ function normalizeHeader(h: unknown): string {
   return String(h ?? "").toLowerCase().trim();
 }
 
+function stripForNumber(s: string): string {
+  // Remove whitespace, currency symbols, and other non-numeric characters
+  // keeping digits, decimal separators (. and ,) and leading minus
+  return s.replace(/[^\d.,-]/g, "").replace(/\s/g, "").replace(",", ".");
+}
+
 function isNumeric(val: unknown): boolean {
   if (val === null || val === undefined || val === "") return false;
-  return !isNaN(Number(String(val).replace(/\s/g, "").replace(",", ".")));
+  const cleaned = stripForNumber(String(val));
+  return cleaned.length > 0 && !isNaN(Number(cleaned));
 }
 
 function toNumber(val: unknown): number {
-  return parseFloat(String(val).replace(/\s/g, "").replace(",", "."));
+  return parseFloat(stripForNumber(String(val)));
 }
 
 function detectCurrency(rows: Record<string, unknown>[]): string {
@@ -435,7 +442,11 @@ function sheetToAllRows(sheet: XLSX.WorkSheet): (string | null)[][] {
     if (addr.startsWith("!")) continue;
     const pos = XLSX.utils.decode_cell(addr);
     const cell = sheet[addr] as XLSX.CellObject | undefined;
-    const val = !cell || cell.v == null ? null : (cell.w ?? String(cell.v));
+    // For numeric cells prefer cell.v (raw number) over cell.w (locale-formatted string
+    // which may include currency symbols like "₽", making isNumeric fail).
+    const val = !cell || cell.v == null ? null
+      : cell.t === "n" ? String(cell.v)
+      : (cell.w ?? String(cell.v));
 
     let colMap = rowMap.get(pos.r);
     if (!colMap) {
