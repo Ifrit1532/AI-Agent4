@@ -196,6 +196,7 @@ interface PriceItemIndex {
   byArticle: Map<string, number[]>;
   byCodeInName: Map<string, number[]>;
   byKeyword: Map<string, number[]>;
+  keywordWeight: Map<string, number>;
 }
 
 function buildPriceIndex(items: PriceItem[]): PriceItemIndex {
@@ -227,7 +228,6 @@ function buildPriceIndex(items: PriceItem[]): PriceItemIndex {
       if (!b) { b = []; byKeyword.set(kw, b); }
       b.push(i);
     }
-    // Also index joined adjacent-token pairs so "АИР 80В6" ↔ "АИР80В6" both match
     for (const jk of joinedPairKeywords(item.name)) {
       let b = byKeyword.get(jk);
       if (!b) { b = []; byKeyword.set(jk, b); }
@@ -235,7 +235,17 @@ function buildPriceIndex(items: PriceItem[]): PriceItemIndex {
     }
   }
 
-  return { items, byArticle, byCodeInName, byKeyword };
+  // TF-IDF-like weights: rarer words = higher weight
+  const keywordWeight = new Map<string, number>();
+  const N = items.length || 1;
+  for (const [kw, bucket] of byKeyword) {
+    const df = bucket.length || 1;
+    const rarity = N / df;
+    // Clamp: very common words → weight 1, very rare → weight 8
+    keywordWeight.set(kw, Math.max(1, Math.min(8, Math.log2(rarity + 1))));
+  }
+
+  return { items, byArticle, byCodeInName, byKeyword, keywordWeight };
 }
 
 // Per-keyword bucket cap: avoids O(N) on very common words like "картридж"
@@ -247,7 +257,7 @@ function findFromIndex(
   topN = 20,
 ): { candidates: PriceItem[]; extractedCodes: string[] } {
   const extractedCodes = extractProductCodes(orderItem.name);
-  const { items, byArticle, byCodeInName, byKeyword } = index;
+  const { items, byArticle, byCodeInName, byKeyword, keywordWeight } = index;
   const candidateSet = new Set<number>();
 
   // 1. Exact article lookup
@@ -266,39 +276,37 @@ function findFromIndex(
     for (const idx of byCodeInName.get(nc) ?? []) candidateSet.add(idx);
   }
 
-  // 3. Keyword hits — take top-50 by hit count
+  // 3. Keyword hits — weighted by TF-IDF rarity
   const orderKws = keywords(orderItem.name);
   const kwHits = new Map<number, number>();
   for (const kw of orderKws) {
     const bucket = byKeyword.get(kw);
     if (!bucket) continue;
+    const w = keywordWeight.get(kw) ?? 1;
     const lim = Math.min(bucket.length, KW_BUCKET_CAP);
     for (let j = 0; j < lim; j++) {
       const idx = bucket[j]!;
-      kwHits.set(idx, (kwHits.get(idx) ?? 0) + 1);
+      kwHits.set(idx, (kwHits.get(idx) ?? 0) + w);
     }
   }
 
-  // 3b. Split-compound fallback: "аир80в6" not in index → try ["аир"]+["80в6"] intersection
-  // Handles price list "АИР 80В6" (spaces) vs order "АИР80В6" (no spaces)
+  // 3b. Split-compound fallback
   for (const kw of orderKws) {
-    if (byKeyword.has(kw)) continue; // already hit
+    if (byKeyword.has(kw)) continue;
     if (kw.length < 4) continue;
     const parts = splitCompoundKeyword(kw).filter((p) => p.length >= 2);
     if (parts.length < 2) continue;
     const buckets = parts.map((p) => byKeyword.get(p));
     if (buckets.some((b) => !b || b.length === 0)) continue;
-    // Intersection of all part buckets
     let inter = new Set<number>(buckets[0]!.slice(0, KW_BUCKET_CAP));
     for (let k = 1; k < buckets.length; k++) {
       const s = new Set(buckets[k]!.slice(0, KW_BUCKET_CAP));
       inter = new Set([...inter].filter((x) => s.has(x)));
     }
-    // Weight intersection hits highly (compound match = strong signal)
-    for (const idx of inter) kwHits.set(idx, (kwHits.get(idx) ?? 0) + parts.length + 1);
+    for (const idx of inter) kwHits.set(idx, (kwHits.get(idx) ?? 0) + parts.length + 2);
   }
 
-  const kwTop = [...kwHits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 50);
+  const kwTop = [...kwHits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 100);
   for (const [idx] of kwTop) candidateSet.add(idx);
 
   // 4. Prefix fallback if index returned nothing
@@ -328,6 +336,7 @@ interface TaggedPriceItemIndex {
   byArticle: Map<string, number[]>;
   byCodeInName: Map<string, number[]>;
   byKeyword: Map<string, number[]>;
+  keywordWeight: Map<string, number>;
 }
 
 function buildTaggedIndex(items1: PriceItem[], items2: PriceItem[]): TaggedPriceItemIndex {
@@ -364,7 +373,6 @@ function buildTaggedIndex(items1: PriceItem[], items2: PriceItem[]): TaggedPrice
       if (!b) { b = []; byKeyword.set(kw, b); }
       b.push(i);
     }
-    // Also index joined adjacent-token pairs so "АИР 80В6" ↔ "АИР80В6" both match
     for (const jk of joinedPairKeywords(item.name)) {
       let b = byKeyword.get(jk);
       if (!b) { b = []; byKeyword.set(jk, b); }
@@ -372,7 +380,15 @@ function buildTaggedIndex(items1: PriceItem[], items2: PriceItem[]): TaggedPrice
     }
   }
 
-  return { items: tagged, byArticle, byCodeInName, byKeyword };
+  const keywordWeight = new Map<string, number>();
+  const N = tagged.length || 1;
+  for (const [kw, bucket] of byKeyword) {
+    const df = bucket.length || 1;
+    const rarity = N / df;
+    keywordWeight.set(kw, Math.max(1, Math.min(8, Math.log2(rarity + 1))));
+  }
+
+  return { items: tagged, byArticle, byCodeInName, byKeyword, keywordWeight };
 }
 
 function findDualFromIndex(
@@ -381,7 +397,7 @@ function findDualFromIndex(
   topN = 20,
 ): { candidates: TaggedPriceItem[]; extractedCodes: string[] } {
   const extractedCodes = extractProductCodes(orderItem.name);
-  const { items, byArticle, byCodeInName, byKeyword } = index;
+  const { items, byArticle, byCodeInName, byKeyword, keywordWeight } = index;
   const candidateSet = new Set<number>();
 
   if (orderItem.article) {
@@ -403,14 +419,15 @@ function findDualFromIndex(
   for (const kw of orderKws) {
     const bucket = byKeyword.get(kw);
     if (!bucket) continue;
+    const w = keywordWeight.get(kw) ?? 1;
     const lim = Math.min(bucket.length, KW_BUCKET_CAP);
     for (let j = 0; j < lim; j++) {
       const idx = bucket[j]!;
-      kwHits.set(idx, (kwHits.get(idx) ?? 0) + 1);
+      kwHits.set(idx, (kwHits.get(idx) ?? 0) + w);
     }
   }
 
-  // Split-compound fallback (same logic as findFromIndex)
+  // Split-compound fallback
   for (const kw of orderKws) {
     if (byKeyword.has(kw)) continue;
     if (kw.length < 4) continue;
@@ -423,10 +440,10 @@ function findDualFromIndex(
       const s = new Set(buckets[k]!.slice(0, KW_BUCKET_CAP));
       inter = new Set([...inter].filter((x) => s.has(x)));
     }
-    for (const idx of inter) kwHits.set(idx, (kwHits.get(idx) ?? 0) + parts.length + 1);
+    for (const idx of inter) kwHits.set(idx, (kwHits.get(idx) ?? 0) + parts.length + 2);
   }
 
-  const kwTop = [...kwHits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 50);
+  const kwTop = [...kwHits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 100);
   for (const [idx] of kwTop) candidateSet.add(idx);
 
   if (candidateSet.size === 0) {
@@ -688,7 +705,7 @@ export async function matchPricesSSE(
   const index = buildPriceIndex(priceItems);
 
   const batchedItems: BatchOrderItem[] = orderItems.map((orderItem) => {
-    const { candidates, extractedCodes } = findFromIndex(orderItem, index, 20);
+    const { candidates, extractedCodes } = findFromIndex(orderItem, index, 100);
     if (candidates.length === 0) {
       logger.warn({ orderName: orderItem.name, article: orderItem.article }, "Zero candidates found for order item");
     }
@@ -757,7 +774,7 @@ export async function matchPricesSSEDual(
   const index = buildTaggedIndex(priceItems1, priceItems2);
 
   const batchedItems: BatchOrderItemDual[] = orderItems.map((orderItem) => {
-    const { candidates, extractedCodes } = findDualFromIndex(orderItem, index, 20);
+    const { candidates, extractedCodes } = findDualFromIndex(orderItem, index, 100);
     if (candidates.length === 0) {
       logger.warn({ orderName: orderItem.name, article: orderItem.article }, "Zero candidates found for order item (dual)");
     }
