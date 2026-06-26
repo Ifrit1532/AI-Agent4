@@ -450,7 +450,12 @@ export default function Home() {
     try {
       const payload = { ...result, items: effectiveItems, grandTotal: effectiveGrandTotal };
       const { downloadId } = await downloadMutation.mutateAsync({ data: payload as unknown as MatchResult });
-      window.location.href = `/api/match/download/${downloadId}`;
+      const a = document.createElement("a");
+      a.href = `/api/match/download/${downloadId}`;
+      a.download = "результат.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
     } catch {
       toast({ title: "Ошибка скачивания", description: "Не удалось скачать результат", variant: "destructive" });
     }
