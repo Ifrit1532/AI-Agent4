@@ -205,6 +205,25 @@ router.get("/match/price-search", (req, res): void => {
   res.json({ items });
 });
 
+// GET /match/download-session/:sessionId — build Excel from cached result (no payload needed)
+router.get("/match/download-session/:sessionId", (req, res): void => {
+  const sessionId = Array.isArray(req.params.sessionId) ? req.params.sessionId[0] : req.params.sessionId;
+  const cached = getCached(sessionId);
+  if (!cached) {
+    res.status(404).json({ error: "Сессия не найдена или истёк срок хранения. Повторите сопоставление." });
+    return;
+  }
+  try {
+    const buffer = buildExcelFromResult(cached as Parameters<typeof buildExcelFromResult>[0]);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", "attachment; filename*=UTF-8''%D1%80%D0%B5%D0%B7%D1%83%D0%BB%D1%8C%D1%82%D0%B0%D1%82.xlsx");
+    res.send(buffer);
+  } catch (err) {
+    req.log.error({ err }, "Failed to build Excel from session");
+    res.status(500).json({ error: "Не удалось сформировать файл Excel" });
+  }
+});
+
 // POST /match/download
 router.post("/match/download", async (req, res): Promise<void> => {
   const body = req.body as MatchResult & { items?: unknown[] };

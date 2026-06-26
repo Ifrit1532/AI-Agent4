@@ -445,9 +445,25 @@ export default function Home() {
   const effectiveGrandTotal = effectiveItems.reduce((s, i) => s + (i.totalPrice ?? 0), 0);
 
   // ── Download ────────────────────────────────────────────────────────────────
+  const [downloadPending, setDownloadPending] = useState(false);
   const handleDownload = async () => {
     if (!result) return;
+    setDownloadPending(true);
     try {
+      // If session is still cached on the server, use lightweight GET endpoint
+      if (sessionId) {
+        const check = await fetch(`/api/match/download-session/${encodeURIComponent(sessionId)}`, { method: "HEAD" });
+        if (check.ok) {
+          const a = document.createElement("a");
+          a.href = `/api/match/download-session/${encodeURIComponent(sessionId)}`;
+          a.download = "результат.xlsx";
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          return;
+        }
+      }
+      // Fallback: POST payload (works for small results)
       const payload = { ...result, items: effectiveItems, grandTotal: effectiveGrandTotal };
       const { downloadId } = await downloadMutation.mutateAsync({ data: payload as unknown as MatchResult });
       const a = document.createElement("a");
@@ -458,6 +474,8 @@ export default function Home() {
       a.remove();
     } catch {
       toast({ title: "Ошибка скачивания", description: "Не удалось скачать результат", variant: "destructive" });
+    } finally {
+      setDownloadPending(false);
     }
   };
 
@@ -957,8 +975,8 @@ export default function Home() {
                 {result.notes && <p className="text-sm text-muted-foreground mt-1">{result.notes}</p>}
                 {!sessionId && <p className="text-xs text-amber-600 mt-1">Поиск по артикулу недоступен (данные сессии устарели)</p>}
               </div>
-              <Button onClick={handleDownload} disabled={downloadMutation.isPending}>
-                {downloadMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
+              <Button onClick={handleDownload} disabled={downloadPending}>
+                {downloadPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
                 Скачать Excel
               </Button>
             </div>
