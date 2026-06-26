@@ -27,7 +27,13 @@ export const DownloadMatchResultBody = zod.object({
   "unitPrice": zod.number().nullish(),
   "totalPrice": zod.number().nullish(),
   "found": zod.boolean(),
-  "matchedName": zod.string().nullish()
+  "matchedName": zod.string().nullish(),
+  "alternatives": zod.array(zod.object({
+  "name": zod.string().optional(),
+  "price": zod.number().optional(),
+  "unit": zod.string().nullish(),
+  "article": zod.string().nullish()
+})).optional()
 })),
   "grandTotal": zod.number(),
   "currency": zod.string(),

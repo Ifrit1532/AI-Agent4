@@ -10,5 +10,6 @@ export * from './downloadResponse';
 export * from './errorResponse';
 export * from './healthStatus';
 export * from './matchedItem';
+export * from './matchedItemAlternativesItem';
 export * from './matchResult';
 export * from './matchResultInput';

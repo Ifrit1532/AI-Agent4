@@ -5,6 +5,7 @@
  * Price Matcher AI Agent API
  * OpenAPI spec version: 0.1.0
  */
+import type { MatchedItemAlternativesItem } from './matchedItemAlternativesItem';
 
 export interface MatchedItem {
   name: string;
@@ -18,4 +19,5 @@ export interface MatchedItem {
   found: boolean;
   /** @nullable */
   matchedName?: string | null;
+  alternatives?: MatchedItemAlternativesItem[];
 }

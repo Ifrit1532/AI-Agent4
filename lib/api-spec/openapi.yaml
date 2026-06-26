@@ -78,6 +78,19 @@ components:
           type: boolean
         matchedName:
           type: ["string", "null"]
+        alternatives:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              price:
+                type: number
+              unit:
+                type: ["string", "null"]
+              article:
+                type: ["string", "null"]
 
     MatchResult:
       type: object

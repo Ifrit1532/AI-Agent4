@@ -25,6 +25,7 @@ interface RichMatchedItem {
   matchedName: string | null;
   matchedArticle?: string | null;
   priceSource?: 1 | 2 | null;
+  alternatives?: PriceCandidate[];
 }
 
 interface RichMatchResult extends MatchResult {
@@ -1051,7 +1052,26 @@ export default function Home() {
                           </TableCell>
 
                           <TableCell className="text-muted-foreground text-sm py-2">
-                            {effectiveItem.matchedName || "-"}
+                            {effectiveItem.found && effectiveItem.matchedName ? (
+                              <div className="flex flex-col gap-1">
+                                <div className="font-medium text-foreground">{effectiveItem.matchedName}</div>
+                                {effectiveItem.alternatives && effectiveItem.alternatives.length > 0 && (
+                                  <div className="flex flex-col gap-0.5">
+                                    <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Варианты:</span>
+                                    {effectiveItem.alternatives.map((alt, ai) => (
+                                      <div key={ai} className="text-xs text-muted-foreground flex gap-1">
+                                        <span className="truncate max-w-[240px]" title={alt.name}>{alt.name}</span>
+                                        {alt.article && <span className="font-mono text-[10px]">{alt.article}</span>}
+                                        <span className="font-semibold">{alt.price.toLocaleString("ru-RU")}</span>
+                                        {alt.unit && <span>{alt.unit}</span>}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-muted-foreground">-</span>
+                            )}
                           </TableCell>
 
                           <TableCell className="text-muted-foreground text-xs font-mono py-2">

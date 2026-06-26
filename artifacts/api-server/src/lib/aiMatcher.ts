@@ -33,6 +33,7 @@ export interface MatchedItem {
   matchedName: string | null;
   matchedArticle: string | null;
   priceSource?: 1 | 2;
+  alternatives?: PriceItem[];
 }
 
 interface TaggedPriceItem extends PriceItem {
@@ -548,25 +549,40 @@ ${candidateList}`;
   const aligned: MatchedItem[] = batchItems.map((b) => {
     const key = b.orderItem.name.trim().toLowerCase();
     const found = byName.get(key);
-    if (found) return found;
-    // Fuzzy fallback: try partial match
-    for (const [k, v] of byName) {
-      if (k.includes(key.slice(0, 20)) || key.includes(k.slice(0, 20))) return v;
+    let item: MatchedItem;
+    if (found) {
+      item = found;
+    } else {
+      // Fuzzy fallback: try partial match
+      for (const [k, v] of byName) {
+        if (k.includes(key.slice(0, 20)) || key.includes(k.slice(0, 20))) {
+          item = v;
+          break;
+        }
+      }
     }
-    logger.warn({ orderName: b.orderItem.name }, "AI did not return result for item — marking not found");
-    return {
-      name: b.orderItem.name,
-      article: b.orderItem.article ?? null,
-      extractedCodes: b.extractedCodes,
-      quantity: b.orderItem.quantity,
-      unit: b.orderItem.unit ?? null,
-      unitPrice: null,
-      totalPrice: null,
-      found: false,
-      matchMethod: "none",
-      matchedName: null,
-      matchedArticle: null,
-    };
+    if (!item) {
+      logger.warn({ orderName: b.orderItem.name }, "AI did not return result for item — marking not found");
+      item = {
+        name: b.orderItem.name,
+        article: b.orderItem.article ?? null,
+        extractedCodes: b.extractedCodes,
+        quantity: b.orderItem.quantity,
+        unit: b.orderItem.unit ?? null,
+        unitPrice: null,
+        totalPrice: null,
+        found: false,
+        matchMethod: "none",
+        matchedName: null,
+        matchedArticle: null,
+      };
+    }
+    // Attach alternatives: all scored candidates except the chosen one
+    const selectedName = item.matchedName ?? "";
+    const alts = b.candidates
+      .filter((c) => c.name !== selectedName)
+      .slice(0, 10);
+    return { ...item, alternatives: alts };
   });
 
   if (parsed.length !== batchItems.length) {
@@ -659,24 +675,39 @@ ${candidateList}`;
   const aligned: MatchedItem[] = batchItems.map((b) => {
     const key = b.orderItem.name.trim().toLowerCase();
     const found = byName.get(key);
-    if (found) return found;
-    for (const [k, v] of byName) {
-      if (k.includes(key.slice(0, 20)) || key.includes(k.slice(0, 20))) return v;
+    let item: MatchedItem;
+    if (found) {
+      item = found;
+    } else {
+      for (const [k, v] of byName) {
+        if (k.includes(key.slice(0, 20)) || key.includes(k.slice(0, 20))) {
+          item = v;
+          break;
+        }
+      }
     }
-    logger.warn({ orderName: b.orderItem.name }, "AI (dual) did not return result for item — marking not found");
-    return {
-      name: b.orderItem.name,
-      article: b.orderItem.article ?? null,
-      extractedCodes: b.extractedCodes,
-      quantity: b.orderItem.quantity,
-      unit: b.orderItem.unit ?? null,
-      unitPrice: null,
-      totalPrice: null,
-      found: false,
-      matchMethod: "none",
-      matchedName: null,
-      matchedArticle: null,
-    };
+    if (!item) {
+      logger.warn({ orderName: b.orderItem.name }, "AI (dual) did not return result for item — marking not found");
+      item = {
+        name: b.orderItem.name,
+        article: b.orderItem.article ?? null,
+        extractedCodes: b.extractedCodes,
+        quantity: b.orderItem.quantity,
+        unit: b.orderItem.unit ?? null,
+        unitPrice: null,
+        totalPrice: null,
+        found: false,
+        matchMethod: "none",
+        matchedName: null,
+        matchedArticle: null,
+      };
+    }
+    const selectedName = item.matchedName ?? "";
+    const alts = b.candidates
+      .filter((c) => c.name !== selectedName)
+      .slice(0, 10)
+      .map((c) => ({ name: c.name, price: c.price, unit: c.unit, article: c.article }));
+    return { ...item, alternatives: alts };
   });
 
   if (parsed.length !== batchItems.length) {

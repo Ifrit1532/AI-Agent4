@@ -9,6 +9,15 @@ export interface HealthStatus {
   status: string;
 }
 
+export type MatchedItemAlternativesItem = {
+  name?: string;
+  price?: number;
+  /** @nullable */
+  unit?: string | null;
+  /** @nullable */
+  article?: string | null;
+};
+
 export interface MatchedItem {
   name: string;
   quantity: number;
@@ -21,6 +30,7 @@ export interface MatchedItem {
   found: boolean;
   /** @nullable */
   matchedName?: string | null;
+  alternatives?: MatchedItemAlternativesItem[];
 }
 
 export interface MatchResult {

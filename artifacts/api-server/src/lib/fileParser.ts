@@ -837,6 +837,7 @@ export function buildExcelFromResult(result: {
     found: boolean;
     matchedName: string | null;
     matchedArticle?: string | null;
+    alternatives?: Array<{ name: string; price: number; unit?: string | null; article?: string | null }>;
   }>;
   grandTotal: number;
   currency: string;
@@ -845,6 +846,7 @@ export function buildExcelFromResult(result: {
   const wb = XLSX.utils.book_new();
 
   const hasArticles = result.items.some((i) => i.matchedArticle);
+  const hasAlternatives = result.items.some((i) => i.alternatives && i.alternatives.length > 0);
 
   const header = [
     "Наименование (запрос)",
@@ -856,21 +858,28 @@ export function buildExcelFromResult(result: {
     `Цена за ед. (${result.currency})`,
     `Сумма (${result.currency})`,
     "Статус",
+    ...(hasAlternatives ? ["Альтернативы (название, артикул, цена)"] : []),
   ];
 
-  const dataRows = result.items.map((item) => [
-    item.name,
-    (item as unknown as { article?: string | null }).article ?? "",
-    item.matchedName ?? "—",
-    ...(hasArticles ? [item.matchedArticle ?? ""] : []),
-    item.quantity,
-    item.unit ?? "",
-    item.unitPrice ?? "",
-    item.totalPrice ?? "",
-    item.found ? "Найдено" : "Не найдено",
-  ]);
+  const dataRows = result.items.map((item) => {
+    const altText = item.alternatives
+      ? item.alternatives.map((a) => `${a.name} (${a.article ?? "без арт."}) = ${a.price}`).join("; ")
+      : "";
+    return [
+      item.name,
+      (item as unknown as { article?: string | null }).article ?? "",
+      item.matchedName ?? "—",
+      ...(hasArticles ? [item.matchedArticle ?? ""] : []),
+      item.quantity,
+      item.unit ?? "",
+      item.unitPrice ?? "",
+      item.totalPrice ?? "",
+      item.found ? "Найдено" : "Не найдено",
+      ...(hasAlternatives ? [altText] : []),
+    ];
+  });
 
-  const totalColIdx = hasArticles ? 7 : 6;
+  const totalColIdx = header.length - 2;
   const emptyRow = new Array(header.length).fill("");
   emptyRow[totalColIdx - 1] = "ИТОГО:";
   emptyRow[totalColIdx] = result.grandTotal;
@@ -886,9 +895,10 @@ export function buildExcelFromResult(result: {
   const wsData = [header, ...dataRows];
   const ws = XLSX.utils.aoa_to_sheet(wsData);
 
-  ws["!cols"] = hasArticles
+  const baseCols = hasArticles
     ? [{ wch: 38 }, { wch: 14 }, { wch: 38 }, { wch: 14 }, { wch: 10 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 15 }]
     : [{ wch: 42 }, { wch: 14 }, { wch: 42 }, { wch: 10 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 15 }];
+  ws["!cols"] = hasAlternatives ? [...baseCols, { wch: 60 }] : baseCols;
 
   XLSX.utils.book_append_sheet(wb, ws, "Результат");
   return XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
