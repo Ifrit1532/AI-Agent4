@@ -184,6 +184,8 @@ export default function Home() {
 
   // Per-row overrides: index → override
   const [overrides, setOverrides] = useState<Map<number, Override>>(new Map());
+  // Per-row selected alternative index: -1 = AI selection (original), 0..N = alternatives[N]
+  const [altSelections, setAltSelections] = useState<Map<number, number>>(new Map());
   const [articleInputs, setArticleInputs] = useState<Map<number, string>>(new Map());
   const [searchResults, setSearchResults] = useState<Map<number, PriceCandidate[]>>(new Map());
   const [searchLoading, setSearchLoading] = useState<Map<number, boolean>>(new Map());
@@ -428,8 +430,30 @@ export default function Home() {
     });
   };
 
+  const applyAlternative = (idx: number, altIdx: number) => {
+    const item = result?.items[idx];
+    if (!item) return;
+    if (altIdx === -1) {
+      // Restore AI selection
+      setAltSelections((m) => { const n = new Map(m); n.delete(idx); return n; });
+      setOverrides((m) => { const n = new Map(m); n.delete(idx); return n; });
+      setEditingPrice((m) => { const n = new Map(m); n.delete(idx); return n; });
+      return;
+    }
+    const alt = item.alternatives?.[altIdx];
+    if (!alt) return;
+    setAltSelections((m) => { const n = new Map(m); n.set(idx, altIdx); return n; });
+    setOverrides((m) => {
+      const n = new Map(m);
+      n.set(idx, { unitPrice: alt.price, matchedName: alt.name, matchedArticle: alt.article ?? null, found: true });
+      return n;
+    });
+    setEditingPrice((m) => { const n = new Map(m); n.set(idx, String(alt.price)); return n; });
+  };
+
   const clearOverride = (idx: number) => {
     setOverrides((m) => { const n = new Map(m); n.delete(idx); return n; });
+    setAltSelections((m) => { const n = new Map(m); n.delete(idx); return n; });
     setArticleInputs((m) => { const n = new Map(m); n.delete(idx); return n; });
     setSearchResults((m) => { const n = new Map(m); n.delete(idx); return n; });
     setEditingPrice((m) => { const n = new Map(m); n.delete(idx); return n; });
@@ -482,7 +506,7 @@ export default function Home() {
   const resetState = () => {
     setPriceFile(null); setOrderFile(null); setResult(null); setError(null);
     setProgress(null); setFromCache(false); setSessionId(null);
-    setOverrides(new Map()); setArticleInputs(new Map());
+    setOverrides(new Map()); setAltSelections(new Map()); setArticleInputs(new Map());
     setSearchResults(new Map()); setSearchLoading(new Map()); setEditingPrice(new Map());
     setPricePreview(null); setSelectedNameCol(""); setSelectedPriceCol("");
     setSelectedArticleCol(NONE_VALUE); setShowColumnConfig(false);
@@ -1076,20 +1100,34 @@ export default function Home() {
 
                           <TableCell className="text-muted-foreground text-sm py-2">
                             {effectiveItem.found && effectiveItem.matchedName ? (
-                              <div className="flex flex-col gap-1">
-                                <div className="font-medium text-foreground">{effectiveItem.matchedName}</div>
-                                {effectiveItem.alternatives && effectiveItem.alternatives.length > 0 && (
-                                  <div className="flex flex-col gap-0.5">
-                                    <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Варианты:</span>
-                                    {effectiveItem.alternatives.map((alt, ai) => (
-                                      <div key={ai} className="text-xs text-muted-foreground flex gap-1">
-                                        <span className="truncate max-w-[240px]" title={alt.name}>{alt.name}</span>
-                                        {alt.article && <span className="font-mono text-[10px]">{alt.article}</span>}
-                                        <span className="font-semibold">{alt.price.toLocaleString("ru-RU")}</span>
-                                        {alt.unit && <span>{alt.unit}</span>}
-                                      </div>
-                                    ))}
-                                  </div>
+                              <div className="flex flex-col gap-1.5">
+                                {item.alternatives && item.alternatives.length > 0 ? (
+                                  <Select
+                                    value={String(altSelections.get(idx) ?? -1)}
+                                    onValueChange={(v) => applyAlternative(idx, Number(v))}
+                                  >
+                                    <SelectTrigger className="h-auto min-h-[32px] text-xs py-1 px-2 text-left [&>span]:whitespace-normal [&>span]:line-clamp-2">
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent className="max-w-[420px]">
+                                      <SelectItem value="-1" className="text-xs">
+                                        <span className="font-medium">🤖 ИИ: </span>
+                                        <span>{item.matchedName}</span>
+                                        {item.matchedArticle && <span className="text-muted-foreground ml-1 font-mono">{item.matchedArticle}</span>}
+                                        <span className="ml-1 text-muted-foreground">— {item.unitPrice?.toLocaleString("ru-RU")} {result.currency}</span>
+                                      </SelectItem>
+                                      {item.alternatives.map((alt, ai) => (
+                                        <SelectItem key={ai} value={String(ai)} className="text-xs">
+                                          <span className="font-medium text-emerald-700">🔀 Вар. {ai + 1}: </span>
+                                          <span>{alt.name}</span>
+                                          {alt.article && <span className="text-muted-foreground ml-1 font-mono">{alt.article}</span>}
+                                          <span className="ml-1 text-muted-foreground">— {alt.price.toLocaleString("ru-RU")} {result.currency}{alt.unit ? ` / ${alt.unit}` : ""}</span>
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                ) : (
+                                  <div className="font-medium text-foreground text-sm">{effectiveItem.matchedName}</div>
                                 )}
                               </div>
                             ) : (

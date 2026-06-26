@@ -206,7 +206,7 @@ router.get("/match/price-search", (req, res): void => {
 });
 
 // GET /match/download-session/:sessionId — build Excel from cached result (no payload needed)
-router.get("/match/download-session/:sessionId", (req, res): void => {
+router.get("/match/download-session/:sessionId", async (req, res): Promise<void> => {
   const sessionId = Array.isArray(req.params.sessionId) ? req.params.sessionId[0] : req.params.sessionId;
   const cached = getCached(sessionId);
   if (!cached) {
@@ -214,7 +214,7 @@ router.get("/match/download-session/:sessionId", (req, res): void => {
     return;
   }
   try {
-    const buffer = buildExcelFromResult(cached as Parameters<typeof buildExcelFromResult>[0]);
+    const buffer = await buildExcelFromResult(cached as Parameters<typeof buildExcelFromResult>[0]);
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", "attachment; filename*=UTF-8''%D1%80%D0%B5%D0%B7%D1%83%D0%BB%D1%8C%D1%82%D0%B0%D1%82.xlsx");
     res.send(buffer);
@@ -233,7 +233,7 @@ router.post("/match/download", async (req, res): Promise<void> => {
   }
 
   try {
-    const buffer = buildExcelFromResult(body as Parameters<typeof buildExcelFromResult>[0]);
+    const buffer = await buildExcelFromResult(body as Parameters<typeof buildExcelFromResult>[0]);
     const downloadId = generateId();
     downloadStore.set(downloadId, buffer);
     setTimeout(() => downloadStore.delete(downloadId), 10 * 60 * 1000);

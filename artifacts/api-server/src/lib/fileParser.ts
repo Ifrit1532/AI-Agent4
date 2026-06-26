@@ -1,4 +1,5 @@
 import XLSX from "xlsx";
+import type ExcelJS from "exceljs";
 import type { OrderItem, PriceItem } from "./aiMatcher";
 import { logger } from "./logger";
 
@@ -827,7 +828,7 @@ export function parseOrderList(buffer: Buffer, overrides?: OrderColumnOverrides)
   return items;
 }
 
-export function buildExcelFromResult(result: {
+export async function buildExcelFromResult(result: {
   items: Array<{
     name: string;
     quantity: number;
@@ -842,64 +843,103 @@ export function buildExcelFromResult(result: {
   grandTotal: number;
   currency: string;
   notes: string | null;
-}): Buffer {
-  const wb = XLSX.utils.book_new();
+}): Promise<Buffer> {
+  // Dynamic import to keep startup fast
+  const ExcelJS = (await import("exceljs")).default;
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Результат");
 
   const hasArticles = result.items.some((i) => i.matchedArticle);
-  const hasAlternatives = result.items.some((i) => i.alternatives && i.alternatives.length > 0);
 
-  const header = [
-    "Наименование (запрос)",
-    "Артикул (запрос)",
-    "Найдено в прайсе",
-    ...(hasArticles ? ["Артикул (прайс)"] : []),
-    "Кол-во",
-    "Ед.",
-    `Цена за ед. (${result.currency})`,
-    `Сумма (${result.currency})`,
-    "Статус",
-    ...(hasAlternatives ? ["Альтернативы (название, артикул, цена)"] : []),
+  // ── Column definitions ────────────────────────────────────────────────────
+  const cols: Array<{ header: string; key: string; width: number }> = [
+    { header: "Наименование (запрос)", key: "name", width: 40 },
+    { header: "Артикул (запрос)", key: "reqArticle", width: 16 },
+    { header: "Найдено в прайсе", key: "matchedName", width: 40 },
+    ...(hasArticles ? [{ header: "Артикул (прайс)", key: "matchedArticle", width: 16 }] : []),
+    { header: "Кол-во", key: "quantity", width: 10 },
+    { header: "Ед.", key: "unit", width: 8 },
+    { header: `Цена за ед. (${result.currency})`, key: "unitPrice", width: 18 },
+    { header: `Сумма (${result.currency})`, key: "totalPrice", width: 18 },
+    { header: "Статус", key: "status", width: 14 },
   ];
 
-  const dataRows = result.items.map((item) => {
-    const altText = item.alternatives
-      ? item.alternatives.map((a) => `${a.name} (${a.article ?? "без арт."}) = ${a.price}`).join("; ")
-      : "";
-    return [
-      item.name,
-      (item as unknown as { article?: string | null }).article ?? "",
-      item.matchedName ?? "—",
-      ...(hasArticles ? [item.matchedArticle ?? ""] : []),
-      item.quantity,
-      item.unit ?? "",
-      item.unitPrice ?? "",
-      item.totalPrice ?? "",
-      item.found ? "Найдено" : "Не найдено",
-      ...(hasAlternatives ? [altText] : []),
-    ];
+  ws.columns = cols;
+
+  // ── Header row style ─────────────────────────────────────────────────────
+  const headerRow = ws.getRow(1);
+  headerRow.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2563EB" } };
+    cell.alignment = { vertical: "middle", wrapText: true };
+    cell.border = {
+      bottom: { style: "thin", color: { argb: "FFE2E8F0" } },
+    };
   });
+  headerRow.height = 28;
 
-  const totalColIdx = header.length - 2;
-  const emptyRow = new Array(header.length).fill("");
-  emptyRow[totalColIdx - 1] = "ИТОГО:";
-  emptyRow[totalColIdx] = result.grandTotal;
-  dataRows.push(emptyRow);
+  // ── Helper fill styles ────────────────────────────────────────────────────
+  const ALT_FILL: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD1FAE5" } }; // light green
+  const ALT_FONT: Partial<ExcelJS.Font> = { italic: true, color: { argb: "FF065F46" }, size: 10 };
 
-  if (result.notes) {
-    dataRows.push(new Array(header.length).fill(""));
-    const noteRow = new Array(header.length).fill("");
-    noteRow[0] = `Примечания: ${result.notes}`;
-    dataRows.push(noteRow);
+  // ── Data rows ─────────────────────────────────────────────────────────────
+  for (const item of result.items) {
+    // Main row
+    const mainRow = ws.addRow({
+      name: item.name,
+      reqArticle: (item as unknown as { article?: string | null }).article ?? "",
+      matchedName: item.matchedName ?? "—",
+      ...(hasArticles ? { matchedArticle: item.matchedArticle ?? "" } : {}),
+      quantity: item.quantity,
+      unit: item.unit ?? "",
+      unitPrice: item.unitPrice ?? "",
+      totalPrice: item.totalPrice ?? "",
+      status: item.found ? "Найдено" : "Не найдено",
+    });
+    mainRow.eachCell({ includeEmpty: true }, (cell) => {
+      cell.alignment = { vertical: "top", wrapText: true };
+    });
+    if (!item.found) {
+      mainRow.getCell("status").font = { color: { argb: "FFDC2626" } };
+    }
+
+    // Alternative rows (light green)
+    if (item.alternatives && item.alternatives.length > 0) {
+      for (const alt of item.alternatives) {
+        const altRow = ws.addRow({
+          name: "",
+          reqArticle: "",
+          matchedName: alt.name,
+          ...(hasArticles ? { matchedArticle: alt.article ?? "" } : {}),
+          quantity: "",
+          unit: alt.unit ?? "",
+          unitPrice: alt.price,
+          totalPrice: "",
+          status: "Вариант",
+        });
+        altRow.eachCell({ includeEmpty: true }, (cell) => {
+          cell.fill = ALT_FILL;
+          cell.font = ALT_FONT;
+          cell.alignment = { vertical: "top", wrapText: true };
+        });
+      }
+    }
   }
 
-  const wsData = [header, ...dataRows];
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  // ── ИТОГО row ─────────────────────────────────────────────────────────────
+  ws.addRow({});
+  const totalRow = ws.addRow({
+    unitPrice: "ИТОГО:",
+    totalPrice: result.grandTotal,
+  });
+  totalRow.getCell("unitPrice").font = { bold: true };
+  totalRow.getCell("totalPrice").font = { bold: true };
 
-  const baseCols = hasArticles
-    ? [{ wch: 38 }, { wch: 14 }, { wch: 38 }, { wch: 14 }, { wch: 10 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 15 }]
-    : [{ wch: 42 }, { wch: 14 }, { wch: 42 }, { wch: 10 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 15 }];
-  ws["!cols"] = hasAlternatives ? [...baseCols, { wch: 60 }] : baseCols;
+  // ── Notes ─────────────────────────────────────────────────────────────────
+  if (result.notes) {
+    ws.addRow({});
+    ws.addRow({ name: `Примечания: ${result.notes}` });
+  }
 
-  XLSX.utils.book_append_sheet(wb, ws, "Результат");
-  return XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+  return wb.xlsx.writeBuffer() as unknown as Promise<Buffer>;
 }
